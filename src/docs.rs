@@ -121,7 +121,7 @@ impl Universe {
 
     /// The kind rustdoc assigned to an item, when it is listed in `paths`.
     pub fn kind_of(&self, r: ItemRef) -> Option<ItemKind> {
-        self.summary(r).map(|s| s.kind.clone())
+        self.summary(r).map(|s| s.kind)
     }
 }
 

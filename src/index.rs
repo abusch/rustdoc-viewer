@@ -57,7 +57,7 @@ impl SearchIndex {
                     item: ItemRef::new(cid, *id),
                     path,
                     name,
-                    kind: summary.kind.clone(),
+                    kind: summary.kind,
                 });
             }
         }

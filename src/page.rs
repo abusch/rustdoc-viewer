@@ -133,6 +133,33 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
     sections
 }
 
+/// The context and accumulating output shared by the page-building helpers.
+///
+/// `u`, `width`, and `hl` are read-only context; `lines` and `targets` are the
+/// page being accumulated. Bundling them keeps the helpers from threading the
+/// same five parameters through every call.
+struct Builder<'a> {
+    u: &'a Universe,
+    width: u16,
+    hl: &'a Highlighter,
+    lines: Vec<Line<'static>>,
+    targets: Vec<Target>,
+}
+
+impl<'a> Builder<'a> {
+    fn new(u: &'a Universe, width: u16, hl: &'a Highlighter) -> Self {
+        Self { u, width, hl, lines: Vec::new(), targets: Vec::new() }
+    }
+
+    fn push(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    fn blank(&mut self) {
+        self.lines.push(Line::default());
+    }
+}
+
 /// Build the page for an item at a given width.
 pub fn build(
     u: &Universe,
@@ -141,8 +168,7 @@ pub fn build(
     hl: &Highlighter,
     expanded: &[ImplGroup],
 ) -> Page {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut targets: Vec<Target> = Vec::new();
+    let mut b = Builder::new(u, width, hl);
     let mut section_lines = Vec::new();
     let mut sections = Vec::new();
 
@@ -152,7 +178,7 @@ pub fn build(
             lines: vec![Line::styled("item not found", WARN)],
             section_lines,
             sections,
-            targets,
+            targets: Vec::new(),
             width,
         };
     };
@@ -164,7 +190,7 @@ pub fn build(
 
     // --- Header -----------------------------------------------------------
     let kind_label = kind.as_ref().map(kind_name).unwrap_or_else(|| inner_name(&item.inner));
-    lines.push(Line::from(vec![
+    b.push(Line::from(vec![
         Span::styled(format!("{kind_label} "), DIM),
         Span::styled(path.clone(), TITLE),
     ]));
@@ -177,55 +203,53 @@ pub fn build(
         if let Some(note) = &dep.note {
             s.push_str(&format!(": {note}"));
         }
-        lines.push(Line::styled(s, WARN));
+        b.push(Line::styled(s, WARN));
     }
     if let Some(stab) = &item.stability
         && matches!(stab.level, rustdoc_types::StabilityLevel::Unstable)
     {
-        lines.push(Line::styled(
+        b.push(Line::styled(
             format!("Unstable — feature = \"{}\"", stab.feature),
             Style::new().fg(Color::Yellow),
         ));
     }
-    lines.push(Line::default());
+    b.blank();
 
     // --- Declaration ------------------------------------------------------
     if let Some(sig) = format::signature(item) {
         for l in hl_code(&sig, hl) {
-            lines.push(l);
+            b.push(l);
         }
-        lines.push(Line::default());
+        b.blank();
     }
 
     // --- Docs -------------------------------------------------------------
     let rendered = render::item_docs(item, width, hl);
-    let doc_start = lines.len();
+    let doc_start = b.lines.len();
     for link in &rendered.links {
         if let Some(target) = u.resolve(r.krate, link.id) {
-            targets.push(Target {
+            b.targets.push(Target {
                 line: doc_start + link.line,
                 spans: Some(link.spans.clone()),
                 item: target,
             });
         }
     }
-    lines.extend(rendered.lines);
-    lines.push(Line::default());
+    b.lines.extend(rendered.lines);
+    b.blank();
 
     // --- Fields / Variants ------------------------------------------------
     match &item.inner {
         ItemEnum::Struct(s) => {
             if let StructKind::Plain { fields, .. } = &s.kind {
-                push_members(u, r, "Fields", fields, &mut lines, &mut targets, width, hl);
+                b.push_members(r, "Fields", fields);
             }
         }
         ItemEnum::Enum(e) => {
-            push_variants(u, r, &e.variants, &mut lines, &mut targets, width, hl);
+            b.push_variants(r, &e.variants);
         }
         ItemEnum::Trait(t) => {
-            push_members(
-                u, r, "Required Methods", &t.items, &mut lines, &mut targets, width, hl,
-            );
+            b.push_members(r, "Required Methods", &t.items);
         }
         _ => {}
     }
@@ -233,17 +257,17 @@ pub fn build(
     // --- Impl sections ----------------------------------------------------
     for section in impls_of(u, r) {
         let is_open = expanded.contains(&section.group);
-        section_lines.push(lines.len());
+        section_lines.push(b.lines.len());
         sections.push(section.group);
 
         let marker = if is_open { "▾" } else { "▸" };
-        lines.push(Line::from(vec![
+        b.push(Line::from(vec![
             Span::styled(format!("{marker} {} ", section.group.title()), SECTION),
             Span::styled(format!("({})", section.impls.len()), DIM),
         ]));
 
         if !is_open {
-            lines.push(Line::default());
+            b.blank();
             continue;
         }
 
@@ -251,7 +275,7 @@ pub fn build(
             let Some(ii) = u.item(*iref) else { continue };
             let ItemEnum::Impl(im) = &ii.inner else { continue };
 
-            lines.push(Line::from(vec![
+            b.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(format::impl_header(im), SIG.add_modifier(Modifier::BOLD)),
             ]));
@@ -265,56 +289,117 @@ pub fn build(
                 let Some(m) = u.item(mref) else { continue };
                 let sig = format::signature(m)
                     .unwrap_or_else(|| m.name.clone().unwrap_or_default());
-                targets.push(Target::line(lines.len(), mref));
+                b.targets.push(Target::line(b.lines.len(), mref));
                 for l in hl_code(&sig, hl) {
-                    lines.push(indent_line(4, l));
+                    b.push(indent_line(4, l));
                 }
-                push_docs(u, mref, m, 6, &mut lines, &mut targets, width, hl);
-                lines.push(Line::default());
+                b.push_docs(mref, m, 6);
+                b.blank();
             }
         }
     }
 
     Page {
         title: path,
-        lines,
+        lines: b.lines,
         section_lines,
         sections,
-        targets,
+        targets: b.targets,
         width,
     }
 }
 
-/// Render an item's markdown docs indented beneath its signature.
-///
-/// Method, field, and variant docs go through the same pipeline as the page's
-/// own docs, so prose wraps, examples keep their syntax highlighting, and
-/// intra-doc links stay navigable.
-#[allow(clippy::too_many_arguments)]
-fn push_docs(
-    u: &Universe,
-    r: ItemRef,
-    item: &Item,
-    indent: usize,
-    lines: &mut Vec<Line<'static>>,
-    targets: &mut Vec<Target>,
-    width: u16,
-    hl: &Highlighter,
-) {
-    let rendered = render::item_docs(item, width.saturating_sub(indent as u16), hl);
-    let start = lines.len();
-    for link in &rendered.links {
-        if let Some(target) = u.resolve(r.krate, link.id) {
-            targets.push(Target {
-                line: start + link.line,
-                // The indent prepends one span, shifting the link's extent.
-                spans: Some(link.spans.start + 1..link.spans.end + 1),
-                item: target,
-            });
+impl Builder<'_> {
+    /// Render an item's markdown docs indented beneath its signature.
+    ///
+    /// Method, field, and variant docs go through the same pipeline as the
+    /// page's own docs, so prose wraps, examples keep their syntax
+    /// highlighting, and intra-doc links stay navigable.
+    fn push_docs(&mut self, r: ItemRef, item: &Item, indent: usize) {
+        let rendered =
+            render::item_docs(item, self.width.saturating_sub(indent as u16), self.hl);
+        let start = self.lines.len();
+        for link in &rendered.links {
+            if let Some(target) = self.u.resolve(r.krate, link.id) {
+                self.targets.push(Target {
+                    line: start + link.line,
+                    // The indent prepends one span, shifting the link's extent.
+                    spans: Some(link.spans.start + 1..link.spans.end + 1),
+                    item: target,
+                });
+            }
+        }
+        for l in rendered.lines {
+            self.lines.push(indent_line(indent, l));
         }
     }
-    for l in rendered.lines {
-        lines.push(indent_line(indent, l));
+
+    fn push_members(&mut self, parent: ItemRef, title: &str, ids: &[Id]) {
+        let members: Vec<ItemRef> = ids
+            .iter()
+            .map(|id| ItemRef::new(parent.krate, *id))
+            .filter(|m| self.u.item(*m).is_some())
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+
+        self.lines.push(Line::styled(format!("  {title}"), SECTION));
+        for m in members {
+            let Some(item) = self.u.item(m) else { continue };
+            let sig = format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
+            self.targets.push(Target::line(self.lines.len(), m));
+            self.lines.push(Line::from(vec![Span::raw("    "), Span::styled(sig, SIG)]));
+            self.push_docs(m, item, 6);
+        }
+        self.lines.push(Line::default());
+    }
+
+    fn push_variants(&mut self, parent: ItemRef, ids: &[Id]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.lines.push(Line::styled("  Variants".to_string(), SECTION));
+        for id in ids {
+            let vref = ItemRef::new(parent.krate, *id);
+            let Some(item) = self.u.item(vref) else { continue };
+            let ItemEnum::Variant(v) = &item.inner else { continue };
+            let name = item.name.clone().unwrap_or_default();
+            let rendered = match &v.kind {
+                VariantKind::Plain => name.clone(),
+                VariantKind::Tuple(fields) => {
+                    let tys: Vec<String> = fields
+                        .iter()
+                        .map(|f| {
+                            f.and_then(|fid| self.u.item(ItemRef::new(parent.krate, fid)))
+                                .and_then(|fi| match &fi.inner {
+                                    ItemEnum::StructField(t) => Some(format::ty(t)),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| "_".into())
+                        })
+                        .collect();
+                    format!("{name}({})", tys.join(", "))
+                }
+                VariantKind::Struct { fields, .. } => {
+                    let fs: Vec<String> = fields
+                        .iter()
+                        .filter_map(|fid| self.u.item(ItemRef::new(parent.krate, *fid)))
+                        .filter_map(|fi| match &fi.inner {
+                            ItemEnum::StructField(t) => {
+                                Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    format!("{name} {{ {} }}", fs.join(", "))
+                }
+            };
+            self.targets.push(Target::line(self.lines.len(), vref));
+            self.lines.push(Line::from(vec![Span::raw("    "), Span::styled(rendered, SIG)]));
+            self.push_docs(vref, item, 6);
+        }
+        self.lines.push(Line::default());
     }
 }
 
@@ -338,90 +423,7 @@ fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
 
 
 
-fn push_members(
-    u: &Universe,
-    parent: ItemRef,
-    title: &str,
-    ids: &[Id],
-    lines: &mut Vec<Line<'static>>,
-    targets: &mut Vec<Target>,
-    width: u16,
-    hl: &Highlighter,
-) {
-    let members: Vec<ItemRef> = ids
-        .iter()
-        .map(|id| ItemRef::new(parent.krate, *id))
-        .filter(|m| u.item(*m).is_some())
-        .collect();
-    if members.is_empty() {
-        return;
-    }
 
-    lines.push(Line::styled(format!("  {title}"), SECTION));
-    for m in members {
-        let Some(item) = u.item(m) else { continue };
-        let sig = format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
-        targets.push(Target::line(lines.len(), m));
-        lines.push(Line::from(vec![Span::raw("    "), Span::styled(sig, SIG)]));
-        push_docs(u, m, item, 6, lines, targets, width, hl);
-    }
-    lines.push(Line::default());
-}
-
-fn push_variants(
-    u: &Universe,
-    parent: ItemRef,
-    ids: &[Id],
-    lines: &mut Vec<Line<'static>>,
-    targets: &mut Vec<Target>,
-    width: u16,
-    hl: &Highlighter,
-) {
-    if ids.is_empty() {
-        return;
-    }
-    lines.push(Line::styled("  Variants".to_string(), SECTION));
-    for id in ids {
-        let vref = ItemRef::new(parent.krate, *id);
-        let Some(item) = u.item(vref) else { continue };
-        let ItemEnum::Variant(v) = &item.inner else { continue };
-        let name = item.name.clone().unwrap_or_default();
-        let rendered = match &v.kind {
-            VariantKind::Plain => name.clone(),
-            VariantKind::Tuple(fields) => {
-                let tys: Vec<String> = fields
-                    .iter()
-                    .map(|f| {
-                        f.and_then(|fid| u.item(ItemRef::new(parent.krate, fid)))
-                            .and_then(|fi| match &fi.inner {
-                                ItemEnum::StructField(t) => Some(format::ty(t)),
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| "_".into())
-                    })
-                    .collect();
-                format!("{name}({})", tys.join(", "))
-            }
-            VariantKind::Struct { fields, .. } => {
-                let fs: Vec<String> = fields
-                    .iter()
-                    .filter_map(|fid| u.item(ItemRef::new(parent.krate, *fid)))
-                    .filter_map(|fi| match &fi.inner {
-                        ItemEnum::StructField(t) => {
-                            Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                format!("{name} {{ {} }}", fs.join(", "))
-            }
-        };
-        targets.push(Target::line(lines.len(), vref));
-        lines.push(Line::from(vec![Span::raw("    "), Span::styled(rendered, SIG)]));
-        push_docs(u, vref, item, 6, lines, targets, width, hl);
-    }
-    lines.push(Line::default());
-}
 
 
 fn kind_name(k: &ItemKind) -> &'static str {
