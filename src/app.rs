@@ -77,6 +77,11 @@ impl App {
             last_width: 80,
         };
         app.refresh_search();
+        // Open on the crate root so there is something to read and navigate
+        // straight away; fall back to search if it cannot be resolved.
+        if let Some(root) = app.universe.root() {
+            app.navigate_to(root);
+        }
         app
     }
 
@@ -388,6 +393,20 @@ mod tests {
         let idx = SearchIndex::build(&u);
         u.set_display_paths(idx.display_paths());
         Some(App::new(u, idx))
+    }
+
+    #[test]
+    fn starts_on_the_std_root_page() {
+        let Some(a) = app() else {
+            eprintln!("skipping: rust-docs-json not available");
+            return;
+        };
+        assert_eq!(a.screen, Screen::Item);
+        assert_eq!(a.page.as_ref().expect("a page").title, "std");
+        // Back from the landing page has nowhere to go but search.
+        let mut a = a;
+        a.go_back();
+        assert_eq!(a.screen, Screen::Search);
     }
 
     #[test]

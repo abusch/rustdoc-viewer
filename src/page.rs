@@ -2,7 +2,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind};
+use rustdoc_types::{
+    Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind, Visibility,
+};
 
 use crate::docs::{ItemRef, Universe};
 use crate::format;
@@ -83,6 +85,20 @@ pub struct Page {
     pub targets: Vec<Target>,
     pub width: u16,
 }
+
+/// Module children are listed in this order, matching the docs.rs layout.
+/// The first element is the kind name from [`inner_name`].
+const MODULE_KINDS: [(&str, &str); 9] = [
+    ("Module", "Modules"),
+    ("Macro", "Macros"),
+    ("Struct", "Structs"),
+    ("Enum", "Enums"),
+    ("Trait", "Traits"),
+    ("Function", "Functions"),
+    ("Type Alias", "Type Aliases"),
+    ("Constant", "Constants"),
+    ("Primitive", "Primitives"),
+];
 
 const TITLE: Style = Style::new().fg(Color::LightMagenta).add_modifier(Modifier::BOLD);
 const SECTION: Style = Style::new().fg(Color::LightBlue).add_modifier(Modifier::BOLD);
@@ -251,6 +267,9 @@ pub fn build(
         ItemEnum::Trait(t) => {
             b.push_members(r, "Required Methods", &t.items);
         }
+        ItemEnum::Module(m) => {
+            b.push_module_contents(r, &m.items);
+        }
         _ => {}
     }
 
@@ -355,6 +374,70 @@ impl Builder<'_> {
         self.lines.push(Line::default());
     }
 
+    /// List a module's children, grouped by kind, one line each.
+    ///
+    /// A module has far too many children to show full docs for, so each gets
+    /// its name and a one-line summary, the way the docs.rs module index does.
+    /// Re-exports are resolved to what they point at, since a `use` item has
+    /// no docs of its own and is not worth navigating to.
+    fn push_module_contents(&mut self, parent: ItemRef, ids: &[Id]) {
+        // Group by kind, keeping each group in the order rustdoc listed it.
+        let mut groups: Vec<(&'static str, Vec<ItemRef>)> =
+            MODULE_KINDS.iter().map(|(_, title)| (*title, Vec::new())).collect();
+
+        for id in ids {
+            let child = ItemRef::new(parent.krate, *id);
+            let Some(item) = self.u.item(child) else { continue };
+            // A `use` is a pointer; show the item it names instead.
+            let target = match &item.inner {
+                ItemEnum::Use(u) => match u.id.and_then(|id| self.u.resolve(parent.krate, id)) {
+                    Some(t) => t,
+                    None => continue,
+                },
+                _ => child,
+            };
+            let Some(resolved) = self.u.item(target) else { continue };
+            if resolved.name.is_none() || !is_public(resolved) {
+                continue;
+            }
+            let slot = MODULE_KINDS
+                .iter()
+                .position(|(k, _)| *k == inner_name(&resolved.inner));
+            if let Some(i) = slot
+                && !groups[i]
+                    .1
+                    .iter()
+                    .any(|e| self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref())
+            {
+                // std both declares a primitive and re-exports core's docs for
+                // it, so the same name can arrive twice; keep the first.
+                groups[i].1.push(target);
+            }
+        }
+
+        for (title, mut members) in groups {
+            if members.is_empty() {
+                continue;
+            }
+            // rustdoc lists children in source order; alphabetical scans better.
+            members.sort_by_cached_key(|m| {
+                self.u.item(*m).and_then(|i| i.name.clone()).unwrap_or_default()
+            });
+            self.push(Line::styled(format!("  {title}"), SECTION));
+            for m in members {
+                let Some(item) = self.u.item(m) else { continue };
+                let name = item.name.clone().unwrap_or_default();
+                self.targets.push(Target::line(self.lines.len(), m));
+                let mut spans = vec![Span::raw("    "), Span::styled(name, SIG)];
+                if let Some(summary) = summary_line(item) {
+                    spans.push(Span::styled(format!("  {summary}"), DIM));
+                }
+                self.push(Line::from(spans));
+            }
+            self.blank();
+        }
+    }
+
     fn push_variants(&mut self, parent: ItemRef, ids: &[Id]) {
         if ids.is_empty() {
             return;
@@ -455,6 +538,66 @@ fn kind_name(k: &ItemKind) -> &'static str {
     }
 }
 
+/// Whether an item belongs in a module listing.
+///
+/// The JSON carries crate-internal items (`std::sys`, `std::panicking`)
+/// alongside the public API; only the latter is worth listing. A stripped
+/// module is likewise not public API — it exists only to carry re-exports.
+/// `#[doc(hidden)]` items never reach the JSON at all.
+fn is_public(item: &Item) -> bool {
+    if matches!(&item.inner, ItemEnum::Module(m) if m.is_stripped) {
+        return false;
+    }
+    matches!(item.visibility, Visibility::Public | Visibility::Default)
+}
+
+/// The first sentence of an item's docs, for a one-line listing.
+///
+/// This is plain text, not rendered markdown, so rustdoc's `[`Foo`]` link
+/// brackets are stripped rather than shown verbatim.
+fn summary_line(item: &Item) -> Option<String> {
+    let docs = item.docs.as_ref()?;
+    let first = docs.lines().find(|l| !l.trim().is_empty())?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let cleaned = strip_link_brackets(first);
+    Some(cleaned.chars().take(80).collect())
+}
+
+/// Remove markdown link brackets from a plain-text summary.
+fn strip_link_brackets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {}
+            ']' => {
+                // Drop a trailing `(...)` or `[...]` reference, keeping the text.
+                match chars.peek() {
+                    Some('(') => {
+                        for c in chars.by_ref() {
+                            if c == ')' {
+                                break;
+                            }
+                        }
+                    }
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if c == ']' {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn inner_name(inner: &ItemEnum) -> &'static str {
     match inner {
         ItemEnum::Module(_) => "Module",
@@ -496,6 +639,68 @@ mod tests {
     }
 
     
+    #[test]
+    fn module_pages_list_their_contents() {
+        let Some(u) = universe() else { return };
+        let hl = Highlighter::new();
+        let root = u.root().expect("std root");
+        let page = build(&u, root, 100, &hl, &default_expanded());
+
+        let text: Vec<String> = page
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(text.iter().any(|l| l.contains("Modules")), "no Modules section");
+        assert!(text.iter().any(|l| l.trim_start().starts_with("collections")));
+        // Children are navigable, not just printed.
+        assert!(page.targets.len() > 50, "module children should be targets");
+    }
+
+    #[test]
+    fn module_listings_hide_crate_internals() {
+        let Some(u) = universe() else { return };
+        let hl = Highlighter::new();
+        let root = u.root().expect("std root");
+        let page = build(&u, root, 100, &hl, &default_expanded());
+
+        // These are `pub(crate)` in the JSON but absent from the website.
+        for internal in ["panicking", "backtrace_rs", "__restricted_std_workaround"] {
+            let listed = page.lines.iter().any(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.trim_start().starts_with(&format!("{internal} "))
+                    || t.trim() == internal
+            });
+            assert!(!listed, "{internal} should not be listed");
+        }
+    }
+
+    #[test]
+    fn module_listings_have_no_duplicate_names_per_section() {
+        let Some(u) = universe() else { return };
+        let hl = Highlighter::new();
+        let root = u.root().expect("std root");
+        let page = build(&u, root, 100, &hl, &default_expanded());
+
+        // std both declares primitives and re-exports core's docs for them.
+        let mut seen: Vec<String> = Vec::new();
+        let mut section = String::new();
+        for l in &page.lines {
+            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            if t.starts_with("  ") && !t.starts_with("    ") && !t.trim().is_empty() {
+                section = t.trim().to_string();
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("    ") {
+                let name = rest.split_whitespace().next().unwrap_or("").to_string();
+                let key = format!("{section}/{name}");
+                assert!(!seen.contains(&key), "{key} listed twice");
+                seen.push(key);
+            }
+        }
+    }
+
     #[test]
     fn groups_vec_impls_into_four_sections() {
         let Some(u) = universe() else {

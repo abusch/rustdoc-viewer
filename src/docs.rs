@@ -75,6 +75,16 @@ impl Universe {
         (0..self.crates.len()).map(CrateId)
     }
 
+    /// The crate root module of the first crate loaded, i.e. `std`.
+    ///
+    /// This is the page the app opens on, mirroring the docs.rs front page.
+    pub fn root(&self) -> Option<ItemRef> {
+        let krate = CrateId(0);
+        let id = self.crates.first()?.root;
+        self.item(ItemRef::new(krate, id))?;
+        Some(ItemRef::new(krate, id))
+    }
+
     pub fn krate(&self, krate: CrateId) -> &Crate {
         &self.crates[krate.0]
     }
