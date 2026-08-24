@@ -207,7 +207,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Screen::Search => {
                 format!("{} results · ↑↓ select · ⏎ open · ? help · esc quit", app.results.len())
             }
-            _ => "/ search · ⏎ follow · tab link · ^o back · ^f fwd · n/p section · space fold · ? help".into(),
+            _ => "/ search · ⏎ follow · tab/⇧tab link · ^o back · ^f fwd · n/p section · space fold · ? help".into(),
         }
     };
     f.render_widget(
@@ -221,6 +221,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("/", "open search"),
         ("⏎", "open selected · follow focused link"),
         ("tab", "focus next link (item view)"),
+        ("⇧tab", "focus previous link"),
         ("^o / backspace", "go back"),
         ("^f", "go forward"),
         ("j / k / ↑ / ↓", "scroll"),

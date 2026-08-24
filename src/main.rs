@@ -134,6 +134,8 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
             }
         }
         (KeyCode::Tab, _) => app.focus_next_target(),
+        // Crossterm reports shift-tab as its own key code, not Tab+SHIFT.
+        (KeyCode::BackTab, _) => app.focus_prev_target(),
         (KeyCode::Backspace, _) | (KeyCode::Char('o'), true) => app.go_back(),
         // Terminals send the same byte for Tab and Ctrl-i, and Tab is bound to
         // link focus, so forward navigation lives on Ctrl-f instead.
