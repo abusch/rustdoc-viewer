@@ -142,7 +142,8 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
 
-    let focused_line = app.focus.and_then(|i| page.targets.get(i)).map(|t| t.line);
+    let focused = app.focus.and_then(|i| page.targets.get(i));
+    let focused_line = focused.map(|t| t.line);
     // Mark which section `space` will act on.
     let cursor_line = page.section_lines.get(app.section_cursor).copied();
 
@@ -155,7 +156,19 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
         .take(area.height.saturating_sub(2) as usize)
         .map(|(i, l)| {
             if Some(i) == focused_line {
-                l.clone().style(Style::new().bg(Color::Rgb(50, 50, 70)))
+                let hl = Style::new().bg(Color::Rgb(50, 50, 70));
+                let mut l = l.clone();
+                match focused.and_then(|t| t.spans.clone()) {
+                    // A link highlights its own text only, not the line it sits on.
+                    Some(range) => {
+                        let n = l.spans.len();
+                        for span in &mut l.spans[range.start.min(n)..range.end.min(n)] {
+                            span.style = span.style.patch(hl);
+                        }
+                        l
+                    }
+                    None => l.style(hl),
+                }
             } else if Some(i) == cursor_line {
                 l.clone().style(Style::new().bg(Color::Rgb(35, 35, 50)))
             } else {

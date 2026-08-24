@@ -12,10 +12,16 @@ use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 /// A link target discovered while rendering docs, so the UI can follow it.
+///
+/// A link is addressed by the exact spans it occupies, not merely by its line,
+/// so the UI can highlight the link text alone. Wrapping can split one link
+/// across lines, in which case it yields one `LinkTarget` per line.
 #[derive(Debug, Clone)]
 pub struct LinkTarget {
     /// Line within the rendered block that carries the link.
     pub line: usize,
+    /// Half-open range of span indices within that line covered by the link.
+    pub spans: std::ops::Range<usize>,
     pub id: Id,
 }
 
@@ -148,6 +154,26 @@ const CODE: Style = Style::new().fg(Color::LightGreen);
 const LINK: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
 const QUOTE: Style = Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
 
+/// Marks a span as belonging to link number `n`.
+///
+/// Link extents cannot be recorded when the link is emitted: at that point the
+/// text is still an unwrapped run of spans, and `wrap_into` decides only later
+/// which line each piece lands on. So links are tagged here and their extents
+/// recovered from the wrapped lines afterwards. `underline_color` is unused by
+/// this renderer, carries through wrapping untouched, and is cleared once the
+/// tag has been read back.
+fn tag(style: Style, n: usize) -> Style {
+    style.underline_color(Color::Indexed(u8::try_from(n % 255).unwrap_or(0) + 1))
+}
+
+/// Read back the link number a span was tagged with, if any.
+fn tag_of(style: Style) -> Option<usize> {
+    match style.underline_color {
+        Some(Color::Indexed(n)) if n > 0 => Some(usize::from(n - 1)),
+        _ => None,
+    }
+}
+
 /// Render an item's markdown docs to styled, width-wrapped lines.
 pub fn markdown(
     docs: &str,
@@ -166,6 +192,8 @@ pub fn markdown(
     let mut code_lang = "rs";
     let mut quote_depth = 0usize;
     let mut pending_link: Option<String> = None;
+    // Links tagged in the current unflushed run, indexed by tag number.
+    let mut pending_ids: Vec<Id> = Vec::new();
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -181,13 +209,17 @@ pub fn markdown(
         Some((raw.into(), pulldown_cmark::CowStr::Borrowed("")))
     };
 
-    // Flush the current inline run as wrapped lines with the given indent.
+    // Flush the current inline run as wrapped lines with the given indent,
+    // then recover the extent of every link tagged within it.
     macro_rules! flush {
         ($indent:expr) => {{
             if !spans.is_empty() {
                 let indent: String = $indent;
+                let from = out.lines.len();
                 wrap_into(&mut out.lines, std::mem::take(&mut spans), width, &indent);
+                collect_links(&mut out, from, &pending_ids);
             }
+            pending_ids.clear();
         }};
     }
 
@@ -280,19 +312,23 @@ pub fn markdown(
             Event::Code(text) => {
                 // Inline code may itself be an intra-doc link target.
                 let key = text.to_string();
+                let mut st = CODE;
                 if let Some(id) = lookup(links, &key, pending_link.as_deref()) {
-                    out.links.push(LinkTarget { line: out.lines.len(), id });
+                    st = tag(LINK, pending_ids.len());
+                    pending_ids.push(id);
                 }
-                spans.push(Span::styled(format!("`{key}`"), CODE));
+                spans.push(Span::styled(format!("`{key}`"), st));
             }
             Event::Text(text) => {
                 if let Some(code) = in_code.as_mut() {
                     code.push_str(&text);
                 } else {
+                    let mut st = style;
                     if let Some(id) = lookup(links, &text, pending_link.as_deref()) {
-                        out.links.push(LinkTarget { line: out.lines.len(), id });
+                        st = tag(style, pending_ids.len());
+                        pending_ids.push(id);
                     }
-                    spans.push(Span::styled(text.to_string(), style));
+                    spans.push(Span::styled(text.to_string(), st));
                 }
             }
             Event::SoftBreak => spans.push(Span::raw(" ")),
@@ -315,6 +351,35 @@ pub fn markdown(
         out.lines.pop();
     }
     out
+}
+
+/// Recover link extents from lines `from..` and clear the tags.
+///
+/// Wrapping may split a tagged run across lines; each line the tag appears on
+/// becomes its own `LinkTarget`, so the highlight follows the text exactly.
+fn collect_links(out: &mut Rendered, from: usize, ids: &[Id]) {
+    for line in from..out.lines.len() {
+        // Run of consecutive spans sharing one tag: (tag, start index).
+        let mut run: Option<(usize, usize)> = None;
+        let len = out.lines[line].spans.len();
+        for i in 0..=len {
+            let here = (i < len).then(|| tag_of(out.lines[line].spans[i].style)).flatten();
+            match (run, here) {
+                (Some((n, _)), Some(m)) if n == m => continue,
+                (Some((n, start)), _) => {
+                    if let Some(id) = ids.get(n) {
+                        out.links.push(LinkTarget { line, spans: start..i, id: *id });
+                    }
+                    run = here.map(|m| (m, i));
+                }
+                (None, Some(m)) => run = Some((m, i)),
+                (None, None) => {}
+            }
+        }
+        for span in &mut out.lines[line].spans {
+            span.style.underline_color = None;
+        }
+    }
 }
 
 /// Resolve a link by its display text or its destination.
@@ -454,5 +519,78 @@ mod tests {
         let r = markdown("See [`None`] for details.", &links, 60, &hl);
         assert_eq!(r.links.len(), 1);
         assert_eq!(r.links[0].id, Id(59));
+    }
+
+    /// Text of the spans a link covers, which is what gets highlighted.
+    fn link_text(r: &Rendered, i: usize) -> String {
+        let t = &r.links[i];
+        r.lines[t.line].spans[t.spans.clone()]
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn link_extent_covers_only_the_link_text() {
+        let hl = Highlighter::new();
+        let mut links = HashMap::new();
+        links.insert("`None`".to_string(), Id(59));
+        let r = markdown("See [`None`] for details.", &links, 60, &hl);
+
+        assert_eq!(link_text(&r, 0), "`None`");
+        // The surrounding prose must stay outside the highlighted range.
+        assert!(r.lines[r.links[0].line].width() > 6);
+    }
+
+    #[test]
+    fn multiple_links_get_separate_extents() {
+        let hl = Highlighter::new();
+        let mut links = HashMap::new();
+        links.insert("`Some`".to_string(), Id(1));
+        links.insert("`None`".to_string(), Id(2));
+        let r = markdown("Either [`Some`] or [`None`] here.", &links, 60, &hl);
+
+        assert_eq!(r.links.len(), 2);
+        assert_eq!(link_text(&r, 0), "`Some`");
+        assert_eq!(link_text(&r, 1), "`None`");
+        assert_eq!(r.links[0].id, Id(1));
+        assert_eq!(r.links[1].id, Id(2));
+    }
+
+    #[test]
+    fn link_tags_do_not_survive_into_rendered_spans() {
+        let hl = Highlighter::new();
+        let mut links = HashMap::new();
+        links.insert("`None`".to_string(), Id(59));
+        let r = markdown("See [`None`] for details.", &links, 60, &hl);
+
+        // The tag is an internal marker; leaving it set would paint a stray
+        // underline colour in the terminal.
+        for line in &r.lines {
+            for span in &line.spans {
+                assert!(span.style.underline_color.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_wrapped_across_lines_yields_one_target_per_line() {
+        let hl = Highlighter::new();
+        let mut links = HashMap::new();
+        links.insert("a very long link label that must wrap".to_string(), Id(7));
+        let r = markdown(
+            "x [a very long link label that must wrap](y) z",
+            &links,
+            20,
+            &hl,
+        );
+
+        assert!(r.links.len() > 1, "expected the link to span several lines");
+        assert!(r.links.iter().all(|t| t.id == Id(7)));
+        // Each target must point at a distinct line and cover a real range.
+        let mut lines: Vec<usize> = r.links.iter().map(|t| t.line).collect();
+        lines.dedup();
+        assert_eq!(lines.len(), r.links.len());
+        assert!(r.links.iter().all(|t| t.spans.start < t.spans.end));
     }
 }
