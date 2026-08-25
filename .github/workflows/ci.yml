@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC - the nightly canary only.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # The nightly used for the rust-docs-json component. It must emit the
+  # rustdoc JSON format_version that our rustdoc-types dependency expects
+  # (see src/load.rs), so bump it together with rustdoc-types.
+  DOCS_JSON_NIGHTLY: nightly-2026-08-23
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.os }}
+      - run: cargo test --locked --all-targets
+
+  docs-json-test:
+    name: test (rust-docs-json)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly with rust-docs-json
+        run: |
+          rustup toolchain install "$DOCS_JSON_NIGHTLY" \
+            --profile minimal --component rust-docs-json
+      # src/load.rs shells out to `rustc +nightly`, so `nightly` has to resolve
+      # to the pinned toolchain or the pin above would have no effect.
+      - name: Alias `nightly` to the pinned toolchain
+        run: |
+          rustup toolchain link nightly \
+            "$(rustc +"$DOCS_JSON_NIGHTLY" --print sysroot)"
+      # The docs-JSON tests skip themselves (and pass) when the JSON is
+      # missing, so fail loudly here instead of testing nothing.
+      - name: Assert the docs JSON is present
+        run: |
+          json_dir="$(rustc +nightly --print sysroot)/share/doc/rust/json"
+          ls "$json_dir"
+          test -f "$json_dir/std.json"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+      - run: cargo test --locked --all-targets
+
+  lint:
+    name: fmt + clippy
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  deny:
+    name: cargo-deny
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # Early warning that the latest nightly has moved past our rustdoc-types
+  # pin. Files an issue rather than turning someone's unrelated PR red.
+  nightly-canary:
+    name: canary (latest nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-docs-json
+      - id: canary
+        continue-on-error: true
+        run: cargo test --locked --all-targets
+      - if: steps.canary.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'rust-docs-json: latest nightly breaks the docs tests';
+            const body = [
+              'The scheduled canary failed against the latest nightly.',
+              '',
+              'This usually means rustdoc bumped its JSON `format_version`.',
+              'Update the `rustdoc-types` dependency and the `DOCS_JSON_NIGHTLY`',
+              'value in `.github/workflows/ci.yml` together.',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join('\n');
+            const existing = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'nightly-canary',
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: ['nightly-canary'],
+              });
+            }
