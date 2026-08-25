@@ -207,7 +207,24 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Screen::Search => {
                 format!("{} results · ↑↓ select · ⏎ open · ? help · esc quit", app.results.len())
             }
-            _ => "/ search · ⏎ follow · tab/⇧tab link · ^o back · ^f fwd · n/p section · space fold · ? help".into(),
+            // The full list of item-view bindings does not fit an 80-column
+            // terminal, and this line is truncated rather than wrapped. Drop
+            // hints from the end until it fits, keeping `? help` pinned so the
+            // way to the rest is never the part that gets cut.
+            _ => fit_hints(
+                &[
+                    "/ search",
+                    "⏎ follow",
+                    "tab/⇧tab link",
+                    "u up",
+                    "^o back",
+                    "^f fwd",
+                    "n/p section",
+                    "space fold",
+                ],
+                "? help",
+                area.width.saturating_sub(1),
+            ),
         }
     };
     f.render_widget(
@@ -216,12 +233,40 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Join as many `hints` as fit in `width`, always keeping `pinned` last.
+fn fit_hints(hints: &[&str], pinned: &str, width: u16) -> String {
+    const SEP: &str = " · ";
+    let width = width as usize;
+
+    let mut out = String::new();
+    for hint in hints {
+        let extra = if out.is_empty() { hint.chars().count() } else { SEP.chars().count() + hint.chars().count() };
+        // Leave room for the separator and the pinned hint that follow.
+        let reserved = SEP.chars().count() + pinned.chars().count();
+        if out.chars().count() + extra + reserved > width {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(SEP);
+        }
+        out.push_str(hint);
+    }
+
+    if out.is_empty() {
+        return pinned.to_string();
+    }
+    out.push_str(SEP);
+    out.push_str(pinned);
+    out
+}
+
 fn draw_help(f: &mut Frame, area: Rect) {
     let entries = [
         ("/", "open search"),
         ("⏎", "open selected · follow focused link"),
         ("tab", "focus next link (item view)"),
         ("⇧tab", "focus previous link"),
+        ("u", "go up to the parent item"),
         ("^o / backspace", "go back"),
         ("^f", "go forward"),
         ("j / k / ↑ / ↓", "scroll"),
@@ -260,4 +305,40 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ),
         popup,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_fit_the_width_and_always_keep_the_pinned_one() {
+        let hints = ["/ search", "⏎ follow", "tab/⇧tab link", "u up"];
+
+        // Wide enough for everything.
+        let all = fit_hints(&hints, "? help", 80);
+        assert_eq!(all, "/ search · ⏎ follow · tab/⇧tab link · u up · ? help");
+        assert!(all.chars().count() <= 80);
+
+        // Too narrow: hints drop off the end, `? help` survives.
+        for width in [10, 20, 30, 40, 50] {
+            let line = fit_hints(&hints, "? help", width);
+            assert!(
+                line.chars().count() <= width as usize || line == "? help",
+                "width {width} overflowed: {line:?}"
+            );
+            assert!(line.ends_with("? help"), "width {width} lost the help hint");
+        }
+
+        // Narrower than the pinned hint itself: still report it.
+        assert_eq!(fit_hints(&hints, "? help", 2), "? help");
+    }
+
+    /// The item-view footer is measured in characters, not bytes: the
+    /// separators and arrows are multi-byte.
+    #[test]
+    fn hints_are_measured_in_characters() {
+        let line = fit_hints(&["⏎ follow", "⇧tab link"], "? help", 30);
+        assert!(line.chars().count() <= 30, "{line:?}");
+    }
 }

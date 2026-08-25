@@ -362,6 +362,18 @@ impl App {
         true
     }
 
+    /// Open the item one level up: the module holding a type, the type holding
+    /// a method.
+    pub fn go_to_parent(&mut self) {
+        let Some(item) = self.current().map(|e| e.item) else {
+            return;
+        };
+        match self.universe.parent_of(item) {
+            Some(parent) => self.navigate_to(parent),
+            None => self.status = Some("already at the top".into()),
+        }
+    }
+
     pub fn show_help(&mut self) {
         if self.screen != Screen::Help {
             self.prev_screen = self.screen;
@@ -407,6 +419,35 @@ mod tests {
         let mut a = a;
         a.go_back();
         assert_eq!(a.screen, Screen::Search);
+    }
+
+    #[test]
+    fn u_goes_up_to_the_parent_and_records_history() {
+        let Some(mut a) = app() else {
+            eprintln!("skipping: rust-docs-json not available");
+            return;
+        };
+        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
+        a.navigate_to(vec_ref);
+        assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
+
+        a.go_to_parent();
+        assert_eq!(a.page.as_ref().unwrap().title, "std::vec");
+
+        // Going up is a normal navigation, so back returns to where you were.
+        a.go_back();
+        assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
+    }
+
+    #[test]
+    fn u_at_the_crate_root_says_so_and_stays_put() {
+        let Some(mut a) = app() else { return };
+        let root = a.universe.root().expect("std root");
+        a.navigate_to(root);
+
+        a.go_to_parent();
+        assert_eq!(a.page.as_ref().unwrap().title, "std");
+        assert!(a.status.is_some(), "should explain why nothing happened");
     }
 
     #[test]

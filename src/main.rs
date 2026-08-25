@@ -146,10 +146,63 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         (KeyCode::Char('u'), true) | (KeyCode::PageUp, _) => app.scroll_by(-half),
         (KeyCode::Char('g'), false) | (KeyCode::Home, _) => app.scroll_to_top(),
         (KeyCode::Char('G'), false) | (KeyCode::End, _) => app.scroll_to_bottom(),
+        (KeyCode::Char('u'), false) => app.go_to_parent(),
         (KeyCode::Char('n'), false) => app.next_section(),
         (KeyCode::Char('p'), false) => app.prev_section(),
         (KeyCode::Char(' '), _) => app.toggle_section(),
         (KeyCode::Char('?'), _) => app.show_help(),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> Option<App> {
+        let crates = load::load_std_crates().ok()?;
+        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
+        let mut u = docs::Universe::new(crates, names);
+        let idx = index::SearchIndex::build(&u);
+        u.set_display_paths(idx.display_paths());
+        Some(App::new(u, idx))
+    }
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        app.status = None;
+        handle_key(app, KeyEvent::new(code, modifiers));
+    }
+
+    /// `u` and `^u` share a character and must stay told apart: one walks up
+    /// to the parent item, the other scrolls half a page.
+    #[test]
+    fn u_goes_up_while_ctrl_u_scrolls() {
+        let Some(mut a) = app() else {
+            eprintln!("skipping: rust-docs-json not available");
+            return;
+        };
+        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
+        a.navigate_to(vec_ref);
+
+        // ^u scrolls within the page, leaving the item alone.
+        a.scroll_by(40);
+        let scrolled = a.scroll;
+        press(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(a.scroll < scrolled, "^u should scroll up");
+        assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
+
+        // Plain u leaves the page for its parent.
+        press(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.page.as_ref().unwrap().title, "std::vec");
+    }
+
+    /// On the search screen `u` is literal text, not a command.
+    #[test]
+    fn u_types_into_the_search_query() {
+        let Some(mut a) = app() else { return };
+        a.screen = Screen::Search;
+        a.query.clear();
+        press(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.query, "u");
     }
 }
