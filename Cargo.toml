@@ -2,6 +2,9 @@
 name = "rustdoc-viewer"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal-based viewer for Rust documentation."
+keywords = ["rustdoc", "terminal", "viewer"]
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "rdv"
@@ -14,8 +17,12 @@ pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 rustdoc-types = "0.61"
 serde_json = "1"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
-two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+syntect = { version = "5", default-features = false, features = [
+  "default-fancy",
+] }
+two-face = { version = "0.5", default-features = false, features = [
+  "syntect-fancy",
+] }
 
 [profile.dev]
 opt-level = 1
