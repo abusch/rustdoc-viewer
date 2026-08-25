@@ -29,11 +29,6 @@ pub struct SearchIndex {
     paths: Vec<String>,
 }
 
-/// A single search hit, identified by its index into [`SearchIndex::entries`].
-pub struct Hit {
-    pub entry_idx: usize,
-}
-
 impl SearchIndex {
     pub fn build(universe: &Universe) -> Self {
         let aliases = std_aliases(universe);
@@ -101,12 +96,11 @@ impl SearchIndex {
     /// A query containing `::` is matched against full paths; otherwise it is
     /// matched against bare names, which is what makes searching `push_str`
     /// behave the way you would expect.
-    pub fn search(&self, query: &str, limit: usize) -> Vec<Hit> {
+    /// Returns indices into [`SearchIndex::entries`], best matches first.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<usize> {
         let query = query.trim();
         if query.is_empty() {
-            return (0..self.entries.len().min(limit))
-                .map(|entry_idx| Hit { entry_idx })
-                .collect();
+            return (0..self.entries.len().min(limit)).collect();
         }
 
         let by_path = query.contains("::");
@@ -142,10 +136,7 @@ impl SearchIndex {
         // tiebreak still favours the better item among equals.
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         scored.truncate(limit);
-        scored
-            .into_iter()
-            .map(|(_, entry_idx)| Hit { entry_idx })
-            .collect()
+        scored.into_iter().map(|(_, entry_idx)| entry_idx).collect()
     }
 }
 
@@ -408,7 +399,7 @@ mod tests {
         ] {
             let hits = idx.search(query, 5);
             assert!(!hits.is_empty(), "no hits for {query}");
-            let top = &idx.entry(hits[0].entry_idx).path;
+            let top = &idx.entry(hits[0]).path;
             assert_eq!(top, want, "top hit for {query:?}");
         }
     }
@@ -441,7 +432,7 @@ mod tests {
         ] {
             let hits = idx.search(query, 5);
             assert!(!hits.is_empty(), "no hits for {query}");
-            let top = &idx.entry(hits[0].entry_idx).path;
+            let top = &idx.entry(hits[0]).path;
             assert_eq!(top, want, "top hit for {query:?}");
         }
     }
@@ -499,11 +490,3 @@ mod tests {
         assert!(alias_preference("std::vec::Vec") < alias_preference("std::prelude::v1::Vec"));
     }
 }
-
-
-
-
-
-
-
-

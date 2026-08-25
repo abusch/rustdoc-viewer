@@ -402,12 +402,6 @@ impl Builder<'_> {
         self.lines.push(Line::default());
     }
 
-    /// List a module's children, grouped by kind, one line each.
-    ///
-    /// A module has far too many children to show full docs for, so each gets
-    /// its name and a one-line summary, the way the docs.rs module index does.
-    /// Re-exports are resolved to what they point at, since a `use` item has
-    /// no docs of its own and is not worth navigating to.
     /// A foldable section heading: a marker, the title, and how many members
     /// it holds.
     fn push_section_header(&mut self, id: SectionId, is_open: bool, count: usize) {
@@ -418,6 +412,12 @@ impl Builder<'_> {
         ]));
     }
 
+    /// List a module's children, grouped by kind, one line each.
+    ///
+    /// A module has far too many children to show full docs for, so each gets
+    /// its name and a one-line summary, the way the docs.rs module index does.
+    /// Re-exports are resolved to what they point at, since a `use` item has
+    /// no docs of its own and is not worth navigating to.
     fn push_module_contents(
         &mut self,
         parent: ItemRef,
@@ -559,12 +559,6 @@ fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
     r.lines
 }
 
-
-
-
-
-
-
 fn kind_name(k: &ItemKind) -> &'static str {
     match k {
         ItemKind::Module => "Module",
@@ -658,6 +652,7 @@ fn inner_name(inner: &ItemEnum) -> &'static str {
     match inner {
         ItemEnum::Module(_) => "Module",
         ItemEnum::Struct(_) => "Struct",
+        ItemEnum::Union(_) => "Union",
         ItemEnum::Enum(_) => "Enum",
         ItemEnum::Function(_) => "Function",
         ItemEnum::Trait(_) => "Trait",
@@ -704,7 +699,6 @@ mod tests {
         Some(Universe::new(crates, names))
     }
 
-    
     #[test]
     fn module_pages_list_their_contents() {
         let Some(u) = universe() else { return };
@@ -915,4 +909,3 @@ mod tests {
         assert!(text.contains("Some"), "missing Some variant");
     }
 }
-

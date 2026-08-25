@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use rustdoc_types::{Id, Item};
@@ -226,17 +226,11 @@ pub fn markdown(
     let parser = Parser::new_with_broken_link_callback(docs, opts, Some(&mut callback));
     for event in parser {
         match event {
-            Event::Start(Tag::Heading { level, .. }) => {
+            Event::Start(Tag::Heading { .. }) => {
                 flush!(String::new());
                 if !out.lines.is_empty() {
                     out.lines.push(Line::default());
                 }
-                let hashes = match level {
-                    HeadingLevel::H1 => "",
-                    HeadingLevel::H2 => "",
-                    _ => "",
-                };
-                let _ = hashes;
                 style = HEADING;
             }
             Event::End(TagEnd::Heading(_)) => {

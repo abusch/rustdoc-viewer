@@ -90,12 +90,7 @@ impl App {
     // --- Search -----------------------------------------------------------
 
     pub fn refresh_search(&mut self) {
-        self.results = self
-            .index
-            .search(&self.query, 200)
-            .into_iter()
-            .map(|h| h.entry_idx)
-            .collect();
+        self.results = self.index.search(&self.query, 200);
         self.selected = 0;
         self.search_offset = 0;
     }
