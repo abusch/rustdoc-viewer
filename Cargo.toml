@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "A terminal-based viewer for Rust documentation."
 keywords = ["rustdoc", "terminal", "viewer"]
+categories = ["command-line-utilities", "development-tools"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/abusch/rustdoc-viewer"
+readme = "README.md"
 
 [[bin]]
 name = "rdv"
