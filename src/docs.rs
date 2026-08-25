@@ -69,7 +69,13 @@ impl Universe {
             }
         }
 
-        Self { crates, names, by_path, all_by_path, display: HashMap::new() }
+        Self {
+            crates,
+            names,
+            by_path,
+            all_by_path,
+            display: HashMap::new(),
+        }
     }
 
     /// Record the user-facing spelling for items whose canonical path differs
@@ -236,8 +242,14 @@ mod tests {
         };
 
         // These live in `alloc`/`core` but are reached through `std`.
-        for path in ["alloc::string::String", "alloc::vec::Vec", "core::option::Option"] {
-            let r = u.by_path(path).unwrap_or_else(|| panic!("{path} not found"));
+        for path in [
+            "alloc::string::String",
+            "alloc::vec::Vec",
+            "core::option::Option",
+        ] {
+            let r = u
+                .by_path(path)
+                .unwrap_or_else(|| panic!("{path} not found"));
             assert!(u.item(r).is_some(), "{path} resolved to a missing item");
             assert_eq!(u.path_of(r).as_deref(), Some(path));
         }
@@ -255,7 +267,9 @@ mod tests {
         let idx = crate::index::SearchIndex::build(&u);
         u.set_display_paths(idx.display_paths());
 
-        let start = u.by_path("alloc::string::String::push_str").expect("push_str");
+        let start = u
+            .by_path("alloc::string::String::push_str")
+            .expect("push_str");
         let mut seen = Vec::new();
         let mut at = start;
         while let Some(parent) = u.parent_of(at) {
@@ -263,14 +277,7 @@ mod tests {
             at = parent;
             assert!(seen.len() < 10, "parent chain should terminate: {seen:?}");
         }
-        assert_eq!(
-            seen,
-            [
-                "std::string::String",
-                "std::string",
-                "std",
-            ]
-        );
+        assert_eq!(seen, ["std::string::String", "std::string", "std",]);
     }
 
     /// A type whose module std re-exports resolves through the canonical path,

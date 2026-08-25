@@ -26,7 +26,11 @@ fn main() -> Result<()> {
     let index = index::SearchIndex::build(&universe);
     // Show items under the name people searched for, not their defining crate.
     universe.set_display_paths(index.display_paths());
-    eprintln!("{} items in {:.2}s", index.len(), started.elapsed().as_secs_f32());
+    eprintln!(
+        "{} items in {:.2}s",
+        index.len(),
+        started.elapsed().as_secs_f32()
+    );
 
     let mut app = App::new(universe, index);
 

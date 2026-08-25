@@ -44,7 +44,12 @@ pub fn ty(t: &Type) -> String {
             if !f.generic_params.is_empty() {
                 s.push_str(&hrtb(&f.generic_params));
             }
-            s.push_str(&header_prefix(f.header.is_unsafe, false, false, &f.header.abi));
+            s.push_str(&header_prefix(
+                f.header.is_unsafe,
+                false,
+                false,
+                &f.header.abi,
+            ));
             s.push_str("fn");
             s.push_str(&fn_params(&f.sig, false));
             if let Some(out) = &f.sig.output {
@@ -71,9 +76,17 @@ pub fn ty(t: &Type) -> String {
         Type::ImplTrait(bounds) => format!("impl {}", bound_list(bounds)),
         Type::Infer => "_".to_string(),
         Type::RawPointer { is_mutable, type_ } => {
-            format!("*{} {}", if *is_mutable { "mut" } else { "const" }, ty(type_))
+            format!(
+                "*{} {}",
+                if *is_mutable { "mut" } else { "const" },
+                ty(type_)
+            )
         }
-        Type::BorrowedRef { lifetime, is_mutable, type_ } => {
+        Type::BorrowedRef {
+            lifetime,
+            is_mutable,
+            type_,
+        } => {
             let mut s = String::from("&");
             if let Some(lt) = lifetime {
                 s.push_str(lt);
@@ -85,7 +98,12 @@ pub fn ty(t: &Type) -> String {
             s.push_str(&ty(type_));
             s
         }
-        Type::QualifiedPath { name, args, self_type, trait_ } => {
+        Type::QualifiedPath {
+            name,
+            args,
+            self_type,
+            trait_,
+        } => {
             let base = match trait_ {
                 Some(tr) if !tr.path.is_empty() => {
                     format!("<{} as {}>", ty(self_type), tr.path)
@@ -194,7 +212,11 @@ pub fn bound_list(bounds: &[GenericBound]) -> String {
 
 fn bound(b: &GenericBound) -> String {
     match b {
-        GenericBound::TraitBound { trait_, generic_params, modifier } => {
+        GenericBound::TraitBound {
+            trait_,
+            generic_params,
+            modifier,
+        } => {
             let mut s = String::new();
             if !generic_params.is_empty() {
                 s.push_str(&hrtb(generic_params));
@@ -233,13 +255,17 @@ pub fn generic_params(g: &Generics) -> String {
             match &p.kind {
                 // Synthetic params come from `impl Trait` in argument position
                 // and are already rendered at the use site.
-                GenericParamDefKind::Type { is_synthetic: true, .. } => None,
+                GenericParamDefKind::Type {
+                    is_synthetic: true, ..
+                } => None,
                 GenericParamDefKind::Lifetime { outlives } => Some(if outlives.is_empty() {
                     p.name.clone()
                 } else {
                     format!("{}: {}", p.name, outlives.join(" + "))
                 }),
-                GenericParamDefKind::Type { bounds, default, .. } => {
+                GenericParamDefKind::Type {
+                    bounds, default, ..
+                } => {
                     let mut s = p.name.clone();
                     if !bounds.is_empty() {
                         s.push_str(": ");
@@ -276,9 +302,15 @@ pub fn where_clause(g: &Generics) -> String {
         .iter()
         // Rustdoc emits bound predicates with no bounds (an artifact of
         // const-trait desugaring); they would render as a bare `T:`.
-        .filter(|w| !matches!(w, WherePredicate::BoundPredicate { bounds, .. } if bounds.is_empty()))
+        .filter(
+            |w| !matches!(w, WherePredicate::BoundPredicate { bounds, .. } if bounds.is_empty()),
+        )
         .map(|w| match w {
-            WherePredicate::BoundPredicate { type_, bounds, generic_params } => {
+            WherePredicate::BoundPredicate {
+                type_,
+                bounds,
+                generic_params,
+            } => {
                 let mut s = String::new();
                 if !generic_params.is_empty() {
                     s.push_str(&hrtb(generic_params));
@@ -328,7 +360,11 @@ fn fn_params(sig: &FunctionSignature, allow_self: bool) -> String {
 fn self_param(t: &Type) -> String {
     match t {
         Type::Generic(g) if g == "Self" => "self".to_string(),
-        Type::BorrowedRef { lifetime, is_mutable, type_ } => match type_.as_ref() {
+        Type::BorrowedRef {
+            lifetime,
+            is_mutable,
+            type_,
+        } => match type_.as_ref() {
             Type::Generic(g) if g == "Self" => {
                 let mut s = String::from("&");
                 if let Some(lt) = lifetime {
@@ -472,7 +508,10 @@ mod tests {
         assert_eq!(ty(&Type::Primitive("u8".into())), "u8");
         assert_eq!(ty(&Type::Generic("T".into())), "T");
         assert_eq!(ty(&Type::Infer), "_");
-        assert_eq!(ty(&Type::Slice(Box::new(Type::Primitive("u8".into())))), "[u8]");
+        assert_eq!(
+            ty(&Type::Slice(Box::new(Type::Primitive("u8".into())))),
+            "[u8]"
+        );
     }
 
     #[test]
@@ -528,7 +567,10 @@ mod tests {
         };
         assert_eq!(ty(&path("Vec", Some(args))), "Vec<u8>");
         // No args must not emit an empty `<>`.
-        let empty = GenericArgs::AngleBracketed { args: vec![], constraints: vec![] };
+        let empty = GenericArgs::AngleBracketed {
+            args: vec![],
+            constraints: vec![],
+        };
         assert_eq!(ty(&path("Foo", Some(empty))), "Foo");
     }
 

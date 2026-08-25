@@ -353,7 +353,9 @@ impl App {
     pub fn follow_focus(&mut self) -> bool {
         let Some(f) = self.focus else { return false };
         let Some(p) = &self.page else { return false };
-        let Some(t) = p.targets.get(f) else { return false };
+        let Some(t) = p.targets.get(f) else {
+            return false;
+        };
         let item = t.item;
         self.navigate_to(item);
         true

@@ -78,7 +78,10 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
     let (marker, base) = if selected {
-        ("▸ ", Style::new().fg(Color::White).add_modifier(Modifier::BOLD))
+        (
+            "▸ ",
+            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+        )
     } else {
         ("  ", Style::new())
     };
@@ -94,7 +97,10 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         Span::styled(marker, Style::new().fg(ACCENT)),
         Span::styled(format!("{kind:<9}"), Style::new().fg(Color::Blue)),
         Span::styled(parent, Style::new().fg(Color::DarkGray)),
-        Span::styled(name, base.fg(if selected { Color::White } else { Color::Gray })),
+        Span::styled(
+            name,
+            base.fg(if selected { Color::White } else { Color::Gray }),
+        ),
     ];
     if selected {
         // Pad so the highlight spans the row.
@@ -205,7 +211,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         match app.screen {
             Screen::Search => {
-                format!("{} results · ↑↓ select · ⏎ open · esc back · ? help", app.results.len())
+                format!(
+                    "{} results · ↑↓ select · ⏎ open · esc back · ? help",
+                    app.results.len()
+                )
             }
             // The full list of item-view bindings does not fit an 80-column
             // terminal, and this line is truncated rather than wrapped. Drop
@@ -228,7 +237,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
     };
     f.render_widget(
-        Paragraph::new(Line::styled(format!(" {text}"), Style::new().fg(Color::DarkGray))),
+        Paragraph::new(Line::styled(
+            format!(" {text}"),
+            Style::new().fg(Color::DarkGray),
+        )),
         area,
     );
 }
@@ -240,7 +252,11 @@ fn fit_hints(hints: &[&str], pinned: &str, width: u16) -> String {
 
     let mut out = String::new();
     for hint in hints {
-        let extra = if out.is_empty() { hint.chars().count() } else { SEP.chars().count() + hint.chars().count() };
+        let extra = if out.is_empty() {
+            hint.chars().count()
+        } else {
+            SEP.chars().count() + hint.chars().count()
+        };
         // Leave room for the separator and the pinned hint that follow.
         let reserved = SEP.chars().count() + pinned.chars().count();
         if out.chars().count() + extra + reserved > width {

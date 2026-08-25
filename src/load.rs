@@ -16,14 +16,17 @@ use rustdoc_types::Crate;
 /// `core`, and `std` merely re-exports them.
 pub const STD_CRATES: [&str; 3] = ["std", "core", "alloc"];
 
-const INSTALL_HINT: &str = "install it with:\n    rustup component add rust-docs-json --toolchain nightly";
+const INSTALL_HINT: &str =
+    "install it with:\n    rustup component add rust-docs-json --toolchain nightly";
 
 /// Locate the directory holding the nightly toolchain's rustdoc JSON.
 pub fn json_dir() -> Result<PathBuf> {
     let out = Command::new("rustc")
         .args(["+nightly", "--print", "sysroot"])
         .output()
-        .context("failed to run `rustc +nightly --print sysroot`; is the nightly toolchain installed?")?;
+        .context(
+            "failed to run `rustc +nightly --print sysroot`; is the nightly toolchain installed?",
+        )?;
 
     if !out.status.success() {
         bail!(
@@ -73,7 +76,9 @@ fn check_format_version(text: &str, name: &str) -> Result<()> {
         } else {
             "the nightly toolchain is older than this tool; update it with `rustup update nightly`"
         };
-        bail!("{name}.json uses rustdoc JSON format version {found}, but this build expects {ours};\n{advice}");
+        bail!(
+            "{name}.json uses rustdoc JSON format version {found}, but this build expects {ours};\n{advice}"
+        );
     }
     Ok(())
 }
@@ -104,7 +109,10 @@ pub fn load_std_crates() -> Result<Vec<Crate>> {
 
         handles
             .into_iter()
-            .map(|h| h.join().map_err(|_| anyhow!("a crate-loading thread panicked"))?)
+            .map(|h| {
+                h.join()
+                    .map_err(|_| anyhow!("a crate-loading thread panicked"))?
+            })
             .collect()
     })
 }
@@ -116,7 +124,10 @@ mod tests {
     #[test]
     fn extracts_format_version() {
         assert_eq!(extract_format_version(r#"{"format_version":61}"#), Some(61));
-        assert_eq!(extract_format_version(r#"{"a":1, "format_version" : 42 , "b":2}"#), Some(42));
+        assert_eq!(
+            extract_format_version(r#"{"a":1, "format_version" : 42 , "b":2}"#),
+            Some(42)
+        );
         assert_eq!(extract_format_version(r#"{"root":"x"}"#), None);
     }
 

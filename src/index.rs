@@ -48,11 +48,14 @@ impl SearchIndex {
                 };
                 // Prefer the familiar `std::` spelling when std re-exports it.
                 // Both sources can name the same item; pick the better spelling.
-                let path = [aliases.get(&canonical).cloned(), std_facing_path(&canonical)]
-                    .into_iter()
-                    .flatten()
-                    .min_by_key(|p| alias_preference(p))
-                    .unwrap_or(canonical);
+                let path = [
+                    aliases.get(&canonical).cloned(),
+                    std_facing_path(&canonical),
+                ]
+                .into_iter()
+                .flatten()
+                .min_by_key(|p| alias_preference(p))
+                .unwrap_or(canonical);
                 entries.push(Entry {
                     item: ItemRef::new(cid, *id),
                     path,
@@ -72,7 +75,11 @@ impl SearchIndex {
 
         let names = entries.iter().map(|e| e.name.to_lowercase()).collect();
         let paths = entries.iter().map(|e| e.path.to_lowercase()).collect();
-        Self { entries, names, paths }
+        Self {
+            entries,
+            names,
+            paths,
+        }
     }
 
     pub fn entry(&self, idx: usize) -> &Entry {
@@ -219,7 +226,14 @@ fn name_match(query: &str, name: &str) -> NameMatch {
 /// structurally — rustdoc marks them `Public` and they are reachable in the
 /// module tree — so they are demoted by the module they live in instead.
 fn obscurity_penalty(e: &Entry) -> i32 {
-    const INTERNAL_MODULES: [&str; 6] = ["sys", "sys_common", "core_arch", "stdarch", "intrinsics", "macros"];
+    const INTERNAL_MODULES: [&str; 6] = [
+        "sys",
+        "sys_common",
+        "core_arch",
+        "stdarch",
+        "intrinsics",
+        "macros",
+    ];
 
     let mut segments = e.path.split("::");
     let _krate = segments.next();
@@ -274,16 +288,22 @@ fn std_aliases(universe: &Universe) -> HashMap<String, String> {
     let module_path = std_module_paths(universe, std_id);
 
     for (id, item) in &krate.index {
-        let ItemEnum::Use(u) = &item.inner else { continue };
+        let ItemEnum::Use(u) = &item.inner else {
+            continue;
+        };
         if u.is_glob {
             continue;
         }
         let Some(target) = u.id else { continue };
         // The target id is meaningful only inside std; `paths` translates it.
-        let Some(summary) = krate.paths.get(&target) else { continue };
+        let Some(summary) = krate.paths.get(&target) else {
+            continue;
+        };
         let canonical = summary.path.join("::");
 
-        let Some(parent) = module_path.get(id) else { continue };
+        let Some(parent) = module_path.get(id) else {
+            continue;
+        };
         let alias = if parent.is_empty() {
             format!("std::{}", u.name)
         } else {
@@ -314,10 +334,47 @@ fn std_aliases(universe: &Universe) -> HashMap<String, String> {
 /// public API, so the list is stable too.
 fn std_facing_path(canonical: &str) -> Option<String> {
     const MIRRORED: &[&str] = &[
-        "alloc", "any", "array", "ascii", "borrow", "boxed", "cell", "char", "clone", "cmp",
-        "convert", "default", "error", "f32", "f64", "ffi", "fmt", "future", "hash", "hint",
-        "isize", "iter", "marker", "mem", "num", "ops", "option", "panic", "pin", "primitive",
-        "ptr", "rc", "result", "slice", "str", "string", "sync", "task", "time", "usize", "vec",
+        "alloc",
+        "any",
+        "array",
+        "ascii",
+        "borrow",
+        "boxed",
+        "cell",
+        "char",
+        "clone",
+        "cmp",
+        "convert",
+        "default",
+        "error",
+        "f32",
+        "f64",
+        "ffi",
+        "fmt",
+        "future",
+        "hash",
+        "hint",
+        "isize",
+        "iter",
+        "marker",
+        "mem",
+        "num",
+        "ops",
+        "option",
+        "panic",
+        "pin",
+        "primitive",
+        "ptr",
+        "rc",
+        "result",
+        "slice",
+        "str",
+        "string",
+        "sync",
+        "task",
+        "time",
+        "usize",
+        "vec",
     ];
 
     let (krate, rest) = canonical.split_once("::")?;
@@ -348,8 +405,12 @@ fn std_module_paths(universe: &Universe, std_id: CrateId) -> HashMap<rustdoc_typ
     let mut stack = vec![(krate.root, String::new())];
 
     while let Some((mod_id, prefix)) = stack.pop() {
-        let Some(item) = krate.index.get(&mod_id) else { continue };
-        let ItemEnum::Module(m) = &item.inner else { continue };
+        let Some(item) = krate.index.get(&mod_id) else {
+            continue;
+        };
+        let ItemEnum::Module(m) = &item.inner else {
+            continue;
+        };
 
         for child in &m.items {
             out.insert(*child, prefix.clone());
@@ -479,7 +540,10 @@ mod tests {
             std_facing_path("core::option::Option").as_deref(),
             Some("std::option::Option")
         );
-        assert_eq!(std_facing_path("alloc::rc::Rc").as_deref(), Some("std::rc::Rc"));
+        assert_eq!(
+            std_facing_path("alloc::rc::Rc").as_deref(),
+            Some("std::rc::Rc")
+        );
         // Internals that std does not re-export keep their own name.
         assert_eq!(std_facing_path("core::core_arch::x86::foo"), None);
         assert_eq!(std_facing_path("std::fs::File"), None);

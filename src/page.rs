@@ -2,9 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use rustdoc_types::{
-    Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind, Visibility,
-};
+use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind, Visibility};
 
 use crate::docs::{ItemRef, Universe};
 use crate::format;
@@ -96,7 +94,11 @@ pub struct Target {
 impl Target {
     /// A target occupying a whole line, such as a method or field row.
     fn line(line: usize, item: ItemRef) -> Self {
-        Self { line, spans: None, item }
+        Self {
+            line,
+            spans: None,
+            item,
+        }
     }
 }
 
@@ -131,15 +133,21 @@ const MODULE_KINDS: [(&str, &str); 9] = [
     ("Primitive", "Primitives"),
 ];
 
-const TITLE: Style = Style::new().fg(Color::LightMagenta).add_modifier(Modifier::BOLD);
-const SECTION: Style = Style::new().fg(Color::LightBlue).add_modifier(Modifier::BOLD);
+const TITLE: Style = Style::new()
+    .fg(Color::LightMagenta)
+    .add_modifier(Modifier::BOLD);
+const SECTION: Style = Style::new()
+    .fg(Color::LightBlue)
+    .add_modifier(Modifier::BOLD);
 const SIG: Style = Style::new().fg(Color::White);
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const WARN: Style = Style::new().fg(Color::LightRed);
 
 /// Collect and group the impls attached to an item.
 pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
-    let Some(item) = u.item(r) else { return Vec::new() };
+    let Some(item) = u.item(r) else {
+        return Vec::new();
+    };
     let ids: &[Id] = match &item.inner {
         ItemEnum::Struct(s) => &s.impls,
         ItemEnum::Enum(e) => &e.impls,
@@ -151,14 +159,19 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
 
     let mut sections: Vec<Section> = ImplGroup::all()
         .into_iter()
-        .map(|group| Section { group, impls: Vec::new() })
+        .map(|group| Section {
+            group,
+            impls: Vec::new(),
+        })
         .collect();
 
     for id in ids {
         // Impls always live in the same crate as the type they belong to.
         let iref = ItemRef::new(r.krate, *id);
         let Some(ii) = u.item(iref) else { continue };
-        let ItemEnum::Impl(im) = &ii.inner else { continue };
+        let ItemEnum::Impl(im) = &ii.inner else {
+            continue;
+        };
         let g = classify(im);
         if let Some(s) = sections.iter_mut().find(|s| s.group == g) {
             s.impls.push(iref);
@@ -195,7 +208,13 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     fn new(u: &'a Universe, width: u16, hl: &'a Highlighter) -> Self {
-        Self { u, width, hl, lines: Vec::new(), targets: Vec::new() }
+        Self {
+            u,
+            width,
+            hl,
+            lines: Vec::new(),
+            targets: Vec::new(),
+        }
     }
 
     fn push(&mut self, line: Line<'static>) {
@@ -236,7 +255,10 @@ pub fn build(
         .unwrap_or_else(|| item.name.clone().unwrap_or_else(|| "?".into()));
 
     // --- Header -----------------------------------------------------------
-    let kind_label = kind.as_ref().map(kind_name).unwrap_or_else(|| inner_name(&item.inner));
+    let kind_label = kind
+        .as_ref()
+        .map(kind_name)
+        .unwrap_or_else(|| inner_name(&item.inner));
     b.push(Line::from(vec![
         Span::styled(format!("{kind_label} "), DIM),
         Span::styled(path.clone(), TITLE),
@@ -320,7 +342,9 @@ pub fn build(
 
         for iref in &section.impls {
             let Some(ii) = u.item(*iref) else { continue };
-            let ItemEnum::Impl(im) = &ii.inner else { continue };
+            let ItemEnum::Impl(im) = &ii.inner else {
+                continue;
+            };
 
             b.push(Line::from(vec![
                 Span::raw("  "),
@@ -334,8 +358,8 @@ pub fn build(
             for mid in &im.items {
                 let mref = ItemRef::new(iref.krate, *mid);
                 let Some(m) = u.item(mref) else { continue };
-                let sig = format::signature(m)
-                    .unwrap_or_else(|| m.name.clone().unwrap_or_default());
+                let sig =
+                    format::signature(m).unwrap_or_else(|| m.name.clone().unwrap_or_default());
                 b.targets.push(Target::line(b.lines.len(), mref));
                 for l in hl_code(&sig, hl) {
                     b.push(indent_line(4, l));
@@ -363,8 +387,7 @@ impl Builder<'_> {
     /// page's own docs, so prose wraps, examples keep their syntax
     /// highlighting, and intra-doc links stay navigable.
     fn push_docs(&mut self, r: ItemRef, item: &Item, indent: usize) {
-        let rendered =
-            render::item_docs(item, self.width.saturating_sub(indent as u16), self.hl);
+        let rendered = render::item_docs(item, self.width.saturating_sub(indent as u16), self.hl);
         let start = self.lines.len();
         for link in &rendered.links {
             if let Some(target) = self.u.resolve(r.krate, link.id) {
@@ -394,9 +417,11 @@ impl Builder<'_> {
         self.lines.push(Line::styled(format!("  {title}"), SECTION));
         for m in members {
             let Some(item) = self.u.item(m) else { continue };
-            let sig = format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
+            let sig =
+                format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
             self.targets.push(Target::line(self.lines.len(), m));
-            self.lines.push(Line::from(vec![Span::raw("    "), Span::styled(sig, SIG)]));
+            self.lines
+                .push(Line::from(vec![Span::raw("    "), Span::styled(sig, SIG)]));
             self.push_docs(m, item, 6);
         }
         self.lines.push(Line::default());
@@ -427,12 +452,16 @@ impl Builder<'_> {
         sections: &mut Vec<SectionId>,
     ) {
         // Group by kind, keeping each group in the order rustdoc listed it.
-        let mut groups: Vec<(&'static str, Vec<ItemRef>)> =
-            MODULE_KINDS.iter().map(|(_, title)| (*title, Vec::new())).collect();
+        let mut groups: Vec<(&'static str, Vec<ItemRef>)> = MODULE_KINDS
+            .iter()
+            .map(|(_, title)| (*title, Vec::new()))
+            .collect();
 
         for id in ids {
             let child = ItemRef::new(parent.krate, *id);
-            let Some(item) = self.u.item(child) else { continue };
+            let Some(item) = self.u.item(child) else {
+                continue;
+            };
             // A `use` is a pointer; show the item it names instead.
             let target = match &item.inner {
                 ItemEnum::Use(u) => match u.id.and_then(|id| self.u.resolve(parent.krate, id)) {
@@ -441,7 +470,9 @@ impl Builder<'_> {
                 },
                 _ => child,
             };
-            let Some(resolved) = self.u.item(target) else { continue };
+            let Some(resolved) = self.u.item(target) else {
+                continue;
+            };
             if resolved.name.is_none() || !is_public(resolved) {
                 continue;
             }
@@ -449,10 +480,9 @@ impl Builder<'_> {
                 .iter()
                 .position(|(k, _)| *k == inner_name(&resolved.inner));
             if let Some(i) = slot
-                && !groups[i]
-                    .1
-                    .iter()
-                    .any(|e| self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref())
+                && !groups[i].1.iter().any(|e| {
+                    self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref()
+                })
             {
                 // std both declares a primitive and re-exports core's docs for
                 // it, so the same name can arrive twice; keep the first.
@@ -466,7 +496,10 @@ impl Builder<'_> {
             }
             // rustdoc lists children in source order; alphabetical scans better.
             members.sort_by_cached_key(|m| {
-                self.u.item(*m).and_then(|i| i.name.clone()).unwrap_or_default()
+                self.u
+                    .item(*m)
+                    .and_then(|i| i.name.clone())
+                    .unwrap_or_default()
             });
 
             let id = SectionId::Module(title);
@@ -498,11 +531,16 @@ impl Builder<'_> {
         if ids.is_empty() {
             return;
         }
-        self.lines.push(Line::styled("  Variants".to_string(), SECTION));
+        self.lines
+            .push(Line::styled("  Variants".to_string(), SECTION));
         for id in ids {
             let vref = ItemRef::new(parent.krate, *id);
-            let Some(item) = self.u.item(vref) else { continue };
-            let ItemEnum::Variant(v) = &item.inner else { continue };
+            let Some(item) = self.u.item(vref) else {
+                continue;
+            };
+            let ItemEnum::Variant(v) = &item.inner else {
+                continue;
+            };
             let name = item.name.clone().unwrap_or_default();
             let rendered = match &v.kind {
                 VariantKind::Plain => name.clone(),
@@ -535,7 +573,10 @@ impl Builder<'_> {
                 }
             };
             self.targets.push(Target::line(self.lines.len(), vref));
-            self.lines.push(Line::from(vec![Span::raw("    "), Span::styled(rendered, SIG)]));
+            self.lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(rendered, SIG),
+            ]));
             self.push_docs(vref, item, 6);
         }
         self.lines.push(Line::default());
@@ -712,8 +753,14 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
 
-        assert!(text.iter().any(|l| l.contains("Modules")), "no Modules section");
-        assert!(text.iter().any(|l| l.trim_start().starts_with("collections")));
+        assert!(
+            text.iter().any(|l| l.contains("Modules")),
+            "no Modules section"
+        );
+        assert!(
+            text.iter()
+                .any(|l| l.trim_start().starts_with("collections"))
+        );
         // Children are navigable, not just printed.
         assert!(page.targets.len() > 50, "module children should be targets");
     }
@@ -729,8 +776,7 @@ mod tests {
         for internal in ["panicking", "backtrace_rs", "__restricted_std_workaround"] {
             let listed = page.lines.iter().any(|l| {
                 let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                t.trim_start().starts_with(&format!("{internal} "))
-                    || t.trim() == internal
+                t.trim_start().starts_with(&format!("{internal} ")) || t.trim() == internal
             });
             assert!(!listed, "{internal} should not be listed");
         }
@@ -780,8 +826,16 @@ mod tests {
 
         // Every registered section heading really is at the line claimed.
         for (id, line) in page.sections.iter().zip(&page.section_lines) {
-            let t: String = page.lines[*line].spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(t.contains(id.title()), "line {line} is not {:?}: {t:?}", id.title());
+            let t: String = page.lines[*line]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(
+                t.contains(id.title()),
+                "line {line} is not {:?}: {t:?}",
+                id.title()
+            );
         }
 
         // Folding one drops its members but keeps the heading. std's root is
@@ -795,7 +849,10 @@ mod tests {
             folded.lines.len()
         );
         let titles: Vec<&str> = folded.sections.iter().map(|s| s.title()).collect();
-        assert!(titles.contains(&"Modules"), "heading should survive folding");
+        assert!(
+            titles.contains(&"Modules"),
+            "heading should survive folding"
+        );
     }
 
     #[test]
@@ -888,7 +945,10 @@ mod tests {
             let range = t.spans.clone().unwrap();
             let n = page.lines[t.line].spans.len();
             assert!(range.start < range.end, "empty link extent");
-            assert!(range.end <= n, "link extent {range:?} past line of {n} spans");
+            assert!(
+                range.end <= n,
+                "link extent {range:?} past line of {n} spans"
+            );
         }
     }
 
@@ -901,7 +961,12 @@ mod tests {
         let text: String = page
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Variants"), "no Variants section");

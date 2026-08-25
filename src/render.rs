@@ -151,8 +151,12 @@ fn strip_hidden(code: &str) -> String {
 
 const HEADING: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 const CODE: Style = Style::new().fg(Color::LightGreen);
-const LINK: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
-const QUOTE: Style = Style::new().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+const LINK: Style = Style::new()
+    .fg(Color::Cyan)
+    .add_modifier(Modifier::UNDERLINED);
+const QUOTE: Style = Style::new()
+    .fg(Color::DarkGray)
+    .add_modifier(Modifier::ITALIC);
 
 /// Marks a span as belonging to link number `n`.
 ///
@@ -175,12 +179,7 @@ fn tag_of(style: Style) -> Option<usize> {
 }
 
 /// Render an item's markdown docs to styled, width-wrapped lines.
-pub fn markdown(
-    docs: &str,
-    links: &HashMap<String, Id>,
-    width: u16,
-    hl: &Highlighter,
-) -> Rendered {
+pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highlighter) -> Rendered {
     let width = width.max(20) as usize;
     let mut out = Rendered::default();
 
@@ -332,8 +331,10 @@ pub fn markdown(
             }
             Event::Rule => {
                 flush!(String::new());
-                out.lines
-                    .push(Line::styled("─".repeat(width.min(60)), Style::new().fg(Color::DarkGray)));
+                out.lines.push(Line::styled(
+                    "─".repeat(width.min(60)),
+                    Style::new().fg(Color::DarkGray),
+                ));
             }
             _ => {}
         }
@@ -357,12 +358,18 @@ fn collect_links(out: &mut Rendered, from: usize, ids: &[Id]) {
         let mut run: Option<(usize, usize)> = None;
         let len = out.lines[line].spans.len();
         for i in 0..=len {
-            let here = (i < len).then(|| tag_of(out.lines[line].spans[i].style)).flatten();
+            let here = (i < len)
+                .then(|| tag_of(out.lines[line].spans[i].style))
+                .flatten();
             match (run, here) {
                 (Some((n, _)), Some(m)) if n == m => continue,
                 (Some((n, start)), _) => {
                     if let Some(id) = ids.get(n) {
-                        out.links.push(LinkTarget { line, spans: start..i, id: *id });
+                        out.links.push(LinkTarget {
+                            line,
+                            spans: start..i,
+                            id: *id,
+                        });
                     }
                     run = here.map(|m| (m, i));
                 }
@@ -411,7 +418,10 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
                 continue;
             }
             if used + w > avail && used > 0 {
-                out.push(prefixed(if first { indent } else { &cont }, std::mem::take(&mut current)));
+                out.push(prefixed(
+                    if first { indent } else { &cont },
+                    std::mem::take(&mut current),
+                ));
                 first = false;
                 used = 0;
                 if word.trim().is_empty() {
