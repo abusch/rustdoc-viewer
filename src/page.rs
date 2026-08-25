@@ -39,6 +39,37 @@ impl ImplGroup {
     }
 }
 
+/// A foldable section on a page.
+///
+/// Module listings (`Structs`, `Functions`, ...) fold and step under `n`/`p`
+/// just like impl sections do, but they are not impls and there is a
+/// module-dependent set of them, so they are named by their heading. The
+/// headings come from [`MODULE_KINDS`], so the `&'static str` is a closed set
+/// rather than arbitrary text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionId {
+    Impls(ImplGroup),
+    Module(&'static str),
+}
+
+impl SectionId {
+    pub fn title(self) -> &'static str {
+        match self {
+            SectionId::Impls(g) => g.title(),
+            SectionId::Module(title) => title,
+        }
+    }
+
+    /// Module listings are the whole point of a module page, so they start
+    /// open; impl sections keep their own rule.
+    fn starts_expanded(self) -> bool {
+        match self {
+            SectionId::Impls(g) => g.starts_expanded(),
+            SectionId::Module(_) => true,
+        }
+    }
+}
+
 fn classify(im: &Impl) -> ImplGroup {
     if im.blanket_impl.is_some() {
         ImplGroup::Blanket
@@ -81,7 +112,7 @@ pub struct Page {
     pub lines: Vec<Line<'static>>,
     /// Line index of each section header, parallel to `sections`.
     pub section_lines: Vec<usize>,
-    pub sections: Vec<ImplGroup>,
+    pub sections: Vec<SectionId>,
     pub targets: Vec<Target>,
     pub width: u16,
 }
@@ -182,7 +213,7 @@ pub fn build(
     r: ItemRef,
     width: u16,
     hl: &Highlighter,
-    expanded: &[ImplGroup],
+    expanded: &[SectionId],
 ) -> Page {
     let mut b = Builder::new(u, width, hl);
     let mut section_lines = Vec::new();
@@ -268,22 +299,19 @@ pub fn build(
             b.push_members(r, "Required Methods", &t.items);
         }
         ItemEnum::Module(m) => {
-            b.push_module_contents(r, &m.items);
+            b.push_module_contents(r, &m.items, expanded, &mut section_lines, &mut sections);
         }
         _ => {}
     }
 
     // --- Impl sections ----------------------------------------------------
     for section in impls_of(u, r) {
-        let is_open = expanded.contains(&section.group);
+        let id = SectionId::Impls(section.group);
+        let is_open = is_expanded(id, expanded);
         section_lines.push(b.lines.len());
-        sections.push(section.group);
+        sections.push(id);
 
-        let marker = if is_open { "▾" } else { "▸" };
-        b.push(Line::from(vec![
-            Span::styled(format!("{marker} {} ", section.group.title()), SECTION),
-            Span::styled(format!("({})", section.impls.len()), DIM),
-        ]));
+        b.push_section_header(id, is_open, section.impls.len());
 
         if !is_open {
             b.blank();
@@ -380,7 +408,24 @@ impl Builder<'_> {
     /// its name and a one-line summary, the way the docs.rs module index does.
     /// Re-exports are resolved to what they point at, since a `use` item has
     /// no docs of its own and is not worth navigating to.
-    fn push_module_contents(&mut self, parent: ItemRef, ids: &[Id]) {
+    /// A foldable section heading: a marker, the title, and how many members
+    /// it holds.
+    fn push_section_header(&mut self, id: SectionId, is_open: bool, count: usize) {
+        let marker = if is_open { "▾" } else { "▸" };
+        self.push(Line::from(vec![
+            Span::styled(format!("{marker} {} ", id.title()), SECTION),
+            Span::styled(format!("({count})"), DIM),
+        ]));
+    }
+
+    fn push_module_contents(
+        &mut self,
+        parent: ItemRef,
+        ids: &[Id],
+        expanded: &[SectionId],
+        section_lines: &mut Vec<usize>,
+        sections: &mut Vec<SectionId>,
+    ) {
         // Group by kind, keeping each group in the order rustdoc listed it.
         let mut groups: Vec<(&'static str, Vec<ItemRef>)> =
             MODULE_KINDS.iter().map(|(_, title)| (*title, Vec::new())).collect();
@@ -423,7 +468,18 @@ impl Builder<'_> {
             members.sort_by_cached_key(|m| {
                 self.u.item(*m).and_then(|i| i.name.clone()).unwrap_or_default()
             });
-            self.push(Line::styled(format!("  {title}"), SECTION));
+
+            let id = SectionId::Module(title);
+            let is_open = is_expanded(id, expanded);
+            section_lines.push(self.lines.len());
+            sections.push(id);
+            self.push_section_header(id, is_open, members.len());
+
+            if !is_open {
+                self.blank();
+                continue;
+            }
+
             for m in members {
                 let Some(item) = self.u.item(m) else { continue };
                 let name = item.name.clone().unwrap_or_default();
@@ -619,12 +675,22 @@ fn inner_name(inner: &ItemEnum) -> &'static str {
     }
 }
 
-/// The default set of expanded sections for a fresh page.
-pub fn default_expanded() -> Vec<ImplGroup> {
-    ImplGroup::all()
-        .into_iter()
-        .filter(|g| g.starts_expanded())
-        .collect()
+/// The sections a fresh page has been explicitly toggled open or shut.
+///
+/// Empty: every section starts at its own default. Which sections a page even
+/// has is not known until it is built — a module's listings depend on what it
+/// contains — so this records *deviations* from the defaults rather than the
+/// open set, and [`is_expanded`] resolves the two.
+pub fn default_expanded() -> Vec<SectionId> {
+    Vec::new()
+}
+
+/// Whether a section is open, given the sections the reader has toggled.
+///
+/// A toggled section is the opposite of its default; everything else sits at
+/// its default.
+pub fn is_expanded(id: SectionId, toggled: &[SectionId]) -> bool {
+    id.starts_expanded() != toggled.contains(&id)
 }
 
 #[cfg(test)]
@@ -688,8 +754,9 @@ mod tests {
         let mut section = String::new();
         for l in &page.lines {
             let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            if t.starts_with("  ") && !t.starts_with("    ") && !t.trim().is_empty() {
-                section = t.trim().to_string();
+            // Section headings carry a fold marker; members are indented.
+            if let Some(rest) = t.strip_prefix("▾ ").or_else(|| t.strip_prefix("▸ ")) {
+                section = rest.trim().to_string();
                 continue;
             }
             if let Some(rest) = t.strip_prefix("    ") {
@@ -699,6 +766,57 @@ mod tests {
                 seen.push(key);
             }
         }
+    }
+
+    #[test]
+    fn module_listings_are_foldable_sections() {
+        let Some(u) = universe() else {
+            eprintln!("skipping: rust-docs-json not available");
+            return;
+        };
+        let hl = Highlighter::new();
+        let root = u.root().expect("std root");
+        let page = build(&u, root, 100, &hl, &default_expanded());
+
+        // A module page's listings register as sections, so n/p steps them.
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.title()).collect();
+        assert!(titles.contains(&"Modules"), "got {titles:?}");
+        assert!(titles.contains(&"Macros"), "got {titles:?}");
+        assert_eq!(page.sections.len(), page.section_lines.len());
+
+        // Every registered section heading really is at the line claimed.
+        for (id, line) in page.sections.iter().zip(&page.section_lines) {
+            let t: String = page.lines[*line].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(t.contains(id.title()), "line {line} is not {:?}: {t:?}", id.title());
+        }
+
+        // Folding one drops its members but keeps the heading. std's root is
+        // almost entirely modules, so that is the section worth folding here.
+        let modules = SectionId::Module("Modules");
+        let folded = build(&u, root, 100, &hl, &[modules]);
+        assert!(
+            folded.lines.len() < page.lines.len(),
+            "folding Modules should shorten the page ({} -> {})",
+            page.lines.len(),
+            folded.lines.len()
+        );
+        let titles: Vec<&str> = folded.sections.iter().map(|s| s.title()).collect();
+        assert!(titles.contains(&"Modules"), "heading should survive folding");
+    }
+
+    #[test]
+    fn module_sections_start_open_and_impl_sections_keep_their_defaults() {
+        assert!(SectionId::Module("Structs").starts_expanded());
+        assert!(SectionId::Impls(ImplGroup::Inherent).starts_expanded());
+        assert!(!SectionId::Impls(ImplGroup::Blanket).starts_expanded());
+
+        // `toggled` flips whatever the default was, in both directions.
+        let structs = SectionId::Module("Structs");
+        let blanket = SectionId::Impls(ImplGroup::Blanket);
+        assert!(is_expanded(structs, &[]));
+        assert!(!is_expanded(structs, &[structs]));
+        assert!(!is_expanded(blanket, &[]));
+        assert!(is_expanded(blanket, &[blanket]));
     }
 
     #[test]
@@ -797,3 +915,4 @@ mod tests {
         assert!(text.contains("Some"), "missing Some variant");
     }
 }
+

@@ -2,7 +2,7 @@
 
 use crate::docs::{ItemRef, Universe};
 use crate::index::SearchIndex;
-use crate::page::{self, ImplGroup, Page, Target};
+use crate::page::{self, Page, SectionId, Target};
 use crate::render::Highlighter;
 
 /// Which screen is in front.
@@ -17,7 +17,9 @@ pub enum Screen {
 struct HistoryEntry {
     item: ItemRef,
     scroll: u16,
-    expanded: Vec<ImplGroup>,
+    /// Sections the reader has toggled away from their default state; see
+    /// [`page::is_expanded`].
+    toggled: Vec<SectionId>,
 }
 
 pub struct App {
@@ -136,7 +138,7 @@ impl App {
         self.history.push(HistoryEntry {
             item,
             scroll: 0,
-            expanded: page::default_expanded(),
+            toggled: page::default_expanded(),
         });
         self.cursor = self.history.len();
         self.scroll = 0;
@@ -195,9 +197,9 @@ impl App {
             self.page = None;
             return;
         };
-        let (item, expanded) = (entry.item, entry.expanded.clone());
+        let (item, toggled) = (entry.item, entry.toggled.clone());
         let width = self.page_width();
-        let page = page::build(&self.universe, item, width, &self.highlighter, &expanded);
+        let page = page::build(&self.universe, item, width, &self.highlighter, &toggled);
         self.page = Some(page);
         self.clamp_scroll();
     }
@@ -270,16 +272,16 @@ impl App {
     /// acts on.
     pub fn toggle_section(&mut self) {
         let Some(p) = &self.page else { return };
-        let Some(group) = p.sections.get(self.section_cursor).copied() else {
+        let Some(section) = p.sections.get(self.section_cursor).copied() else {
             self.status = Some("no section selected — use n/p".into());
             return;
         };
 
         if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
-            if let Some(i) = entry.expanded.iter().position(|g| *g == group) {
-                entry.expanded.remove(i);
+            if let Some(i) = entry.toggled.iter().position(|g| *g == section) {
+                entry.toggled.remove(i);
             } else {
-                entry.expanded.push(group);
+                entry.toggled.push(section);
             }
         }
         self.rebuild_page();
@@ -396,7 +398,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::load;
-    use crate::page::ImplGroup;
+    use crate::page::{ImplGroup, SectionId};
 
     fn app() -> Option<App> {
         let crates = load::load_std_crates().ok()?;
@@ -462,7 +464,7 @@ mod tests {
         let sections = a.page.as_ref().unwrap().sections.clone();
         let blanket = sections
             .iter()
-            .position(|g| *g == ImplGroup::Blanket)
+            .position(|g| *g == SectionId::Impls(ImplGroup::Blanket))
             .expect("blanket section");
 
         let before = a.page.as_ref().unwrap().lines.len();

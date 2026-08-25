@@ -228,6 +228,34 @@ mod tests {
         assert!(a.should_quit, "q should quit");
     }
 
+    /// n/p and space work on a module page's listings, not just on impls.
+    #[test]
+    fn module_sections_step_and_fold() {
+        let Some(mut a) = app() else { return };
+        let root = a.universe.root().expect("std root");
+        a.navigate_to(root);
+        assert!(
+            !a.page.as_ref().unwrap().sections.is_empty(),
+            "std's root page should have sections"
+        );
+
+        // n steps to the next section and scrolls it into view.
+        press(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(a.section_cursor, 1);
+        press(&mut a, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(a.section_cursor, 0);
+
+        // space folds the section under the cursor.
+        let before = a.page.as_ref().unwrap().lines.len();
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        let after = a.page.as_ref().unwrap().lines.len();
+        assert!(after < before, "space should fold ({before} -> {after})");
+
+        // ...and again unfolds it.
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.page.as_ref().unwrap().lines.len(), before);
+    }
+
     /// On the search screen `u` is literal text, not a command.
     #[test]
     fn u_types_into_the_search_query() {
