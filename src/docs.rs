@@ -224,22 +224,13 @@ fn parent_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load;
-
     /// Loading the real std JSON is slow-ish but this is the single most
     /// important invariant in the program, so it is worth testing for real.
-    fn universe() -> Option<Universe> {
-        let crates = load::load_std_crates().ok()?;
-        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-        Some(Universe::new(crates, names))
-    }
+    use crate::testdocs::universe;
 
     #[test]
     fn resolves_reexports_across_crates() {
-        let Some(u) = universe() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let u = universe();
 
         // These live in `alloc`/`core` but are reached through `std`.
         for path in [
@@ -260,10 +251,7 @@ mod tests {
     /// one.
     #[test]
     fn parent_walks_up_to_the_crate_root() {
-        let Some(mut u) = universe() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut u = universe();
         let idx = crate::index::SearchIndex::build(&u);
         u.set_display_paths(idx.display_paths());
 
@@ -284,7 +272,7 @@ mod tests {
     /// since `std::vec` is not itself a key in `by_path`.
     #[test]
     fn parent_of_a_reexported_type_finds_its_module() {
-        let Some(mut u) = universe() else { return };
+        let mut u = universe();
         let idx = crate::index::SearchIndex::build(&u);
         u.set_display_paths(idx.display_paths());
 
@@ -299,7 +287,7 @@ mod tests {
 
     #[test]
     fn container_at_prefers_a_module_over_a_macro() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         // Both live at this path; only the module can be a parent.
         let at = u.container_at("alloc::vec").expect("alloc::vec");
         assert_eq!(u.kind_of(at), Some(ItemKind::Module));
@@ -307,7 +295,7 @@ mod tests {
 
     #[test]
     fn crate_roots_have_no_parent() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         for krate in ["std", "core", "alloc"] {
             let root = u.by_path(krate).expect(krate);
             assert_eq!(u.parent_of(root), None, "{krate} should be the top");
@@ -324,7 +312,7 @@ mod tests {
 
     #[test]
     fn impls_resolve_within_owning_crate() {
-        let Some(u) = universe() else { return };
+        let u = universe();
 
         let r = u.by_path("alloc::vec::Vec").expect("Vec");
         let item = u.item(r).expect("Vec item");

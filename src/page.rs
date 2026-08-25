@@ -732,17 +732,11 @@ pub fn is_expanded(id: SectionId, toggled: &[SectionId]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load;
-
-    fn universe() -> Option<Universe> {
-        let crates = load::load_std_crates().ok()?;
-        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-        Some(Universe::new(crates, names))
-    }
+    use crate::testdocs::universe;
 
     #[test]
     fn module_pages_list_their_contents() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
         let page = build(&u, root, 100, &hl, &default_expanded());
@@ -767,7 +761,7 @@ mod tests {
 
     #[test]
     fn module_listings_hide_crate_internals() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
         let page = build(&u, root, 100, &hl, &default_expanded());
@@ -784,7 +778,7 @@ mod tests {
 
     #[test]
     fn module_listings_have_no_duplicate_names_per_section() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
         let page = build(&u, root, 100, &hl, &default_expanded());
@@ -810,10 +804,7 @@ mod tests {
 
     #[test]
     fn module_listings_are_foldable_sections() {
-        let Some(u) = universe() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
         let page = build(&u, root, 100, &hl, &default_expanded());
@@ -872,10 +863,7 @@ mod tests {
 
     #[test]
     fn groups_vec_impls_into_four_sections() {
-        let Some(u) = universe() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let u = universe();
         let r = u.by_path("alloc::vec::Vec").expect("Vec");
         let sections = impls_of(&u, r);
 
@@ -891,7 +879,7 @@ mod tests {
 
     #[test]
     fn builds_a_page_for_string() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("alloc::string::String").expect("String");
         let page = build(&u, r, 80, &hl, &default_expanded());
@@ -905,7 +893,7 @@ mod tests {
 
     #[test]
     fn method_docs_are_rendered_and_highlighted() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("alloc::string::String").expect("String");
         let page = build(&u, r, 100, &hl, &default_expanded());
@@ -934,7 +922,7 @@ mod tests {
 
     #[test]
     fn doc_link_targets_carry_span_extents() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
         let page = build(&u, r, 100, &hl, &default_expanded());
@@ -954,7 +942,7 @@ mod tests {
 
     #[test]
     fn option_variants_render() {
-        let Some(u) = universe() else { return };
+        let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
         let page = build(&u, r, 80, &hl, &default_expanded());

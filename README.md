@@ -22,6 +22,10 @@ supports, point it at an older toolchain instead of downgrading:
 RDV_TOOLCHAIN=nightly-2026-08-23 rdv
 ```
 
+The same applies when running the test suite: the tests assert against the
+real `std` documentation and fail, rather than skipping, when it cannot be
+loaded.
+
 ## Usage
 
 ```sh

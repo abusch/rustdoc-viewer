@@ -394,24 +394,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load;
     use crate::page::{ImplGroup, SectionId};
 
-    fn app() -> Option<App> {
-        let crates = load::load_std_crates().ok()?;
-        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-        let mut u = Universe::new(crates, names);
-        let idx = SearchIndex::build(&u);
-        u.set_display_paths(idx.display_paths());
-        Some(App::new(u, idx))
+    fn app() -> App {
+        let (u, idx) = crate::testdocs::indexed();
+        App::new(u, idx)
     }
 
     #[test]
     fn starts_on_the_std_root_page() {
-        let Some(a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let a = app();
         assert_eq!(a.screen, Screen::Item);
         assert_eq!(a.page.as_ref().expect("a page").title, "std");
         // Back from the landing page has nowhere to go but search.
@@ -422,10 +414,7 @@ mod tests {
 
     #[test]
     fn u_goes_up_to_the_parent_and_records_history() {
-        let Some(mut a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut a = app();
         let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
         a.navigate_to(vec_ref);
         assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
@@ -440,7 +429,7 @@ mod tests {
 
     #[test]
     fn u_at_the_crate_root_says_so_and_stays_put() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let root = a.universe.root().expect("std root");
         a.navigate_to(root);
 
@@ -451,10 +440,7 @@ mod tests {
 
     #[test]
     fn toggling_a_section_expands_it() {
-        let Some(mut a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut a = app();
         let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
         a.navigate_to(vec_ref);
 
@@ -477,10 +463,7 @@ mod tests {
 
     #[test]
     fn shift_tab_walks_links_backwards() {
-        let Some(mut a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut a = app();
         let opt = a.universe.by_path("core::option::Option").expect("Option");
         a.navigate_to(opt);
         a.viewport = 30;
@@ -494,7 +477,7 @@ mod tests {
 
     #[test]
     fn focus_wraps_at_both_ends() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let opt = a.universe.by_path("core::option::Option").expect("Option");
         a.navigate_to(opt);
         a.viewport = 30;
@@ -512,7 +495,7 @@ mod tests {
 
     #[test]
     fn first_shift_tab_starts_from_the_visible_page() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let opt = a.universe.by_path("core::option::Option").expect("Option");
         a.navigate_to(opt);
         a.viewport = 30;
@@ -530,7 +513,7 @@ mod tests {
 
     #[test]
     fn jumping_to_bottom_does_not_move_the_section_cursor() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
         a.navigate_to(vec_ref);
 
@@ -541,7 +524,7 @@ mod tests {
 
     #[test]
     fn history_records_and_restores_scroll() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let s = a.universe.by_path("alloc::string::String").expect("String");
         let o = a.universe.by_path("core::option::Option").expect("Option");
 

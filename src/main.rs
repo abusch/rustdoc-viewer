@@ -7,6 +7,8 @@ mod index;
 mod load;
 mod page;
 mod render;
+#[cfg(test)]
+mod testdocs;
 mod ui;
 
 use std::time::Duration;
@@ -162,13 +164,9 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
 mod tests {
     use super::*;
 
-    fn app() -> Option<App> {
-        let crates = load::load_std_crates().ok()?;
-        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-        let mut u = docs::Universe::new(crates, names);
-        let idx = index::SearchIndex::build(&u);
-        u.set_display_paths(idx.display_paths());
-        Some(App::new(u, idx))
+    fn app() -> App {
+        let (u, idx) = crate::testdocs::indexed();
+        App::new(u, idx)
     }
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
@@ -180,10 +178,7 @@ mod tests {
     /// to the parent item, the other scrolls half a page.
     #[test]
     fn u_goes_up_while_ctrl_u_scrolls() {
-        let Some(mut a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut a = app();
         let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
         a.navigate_to(vec_ref);
 
@@ -203,10 +198,7 @@ mod tests {
     /// item view there is nothing to back out of.
     #[test]
     fn esc_does_not_quit() {
-        let Some(mut a) = app() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let mut a = app();
 
         // Item view: Esc is inert.
         press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
@@ -235,7 +227,7 @@ mod tests {
     /// n/p and space work on a module page's listings, not just on impls.
     #[test]
     fn module_sections_step_and_fold() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         let root = a.universe.root().expect("std root");
         a.navigate_to(root);
         assert!(
@@ -263,7 +255,7 @@ mod tests {
     /// On the search screen `u` is literal text, not a command.
     #[test]
     fn u_types_into_the_search_query() {
-        let Some(mut a) = app() else { return };
+        let mut a = app();
         a.screen = Screen::Search;
         a.query.clear();
         press(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);

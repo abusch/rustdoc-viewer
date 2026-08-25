@@ -32,32 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test-${{ matrix.os }}
-      - run: cargo test --locked --all-targets
-
-  docs-json-test:
-    name: test (rust-docs-json)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The tests read the real std rustdoc JSON and panic without it, so
+      # every platform needs the component.
       - name: Install pinned nightly with rust-docs-json
         run: |
           rustup toolchain install "$DOCS_JSON_NIGHTLY" \
             --profile minimal --component rust-docs-json
-      # The docs-JSON tests skip themselves (and pass) when the JSON is
-      # missing, so fail loudly here instead of testing nothing.
-      - name: Assert the docs JSON is present
-        run: |
-          json_dir="$(rustc +"$DOCS_JSON_NIGHTLY" --print sysroot)/share/doc/rust/json"
-          ls "$json_dir"
-          test -f "$json_dir/std.json"
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-ubuntu-latest
+          shared-key: test-${{ matrix.os }}
       # src/load.rs reads this to decide which toolchain's JSON to load.
       - run: cargo test --locked --all-targets
         env:

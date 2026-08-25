@@ -433,22 +433,14 @@ fn std_module_paths(universe: &Universe, std_id: CrateId) -> HashMap<rustdoc_typ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load;
 
-    fn index() -> Option<(Universe, SearchIndex)> {
-        let crates = load::load_std_crates().ok()?;
-        let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-        let u = Universe::new(crates, names);
-        let i = SearchIndex::build(&u);
-        Some((u, i))
+    fn index() -> (Universe, SearchIndex) {
+        crate::testdocs::indexed_raw()
     }
 
     #[test]
     fn well_known_names_rank_first() {
-        let Some((_u, idx)) = index() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let (_u, idx) = index();
         // The top hit for these should be the obvious std item, spelled the
         // way the website spells it — not a `prelude::v1` re-export.
         for (query, want) in [
@@ -471,10 +463,7 @@ mod tests {
     /// still what was meant.
     #[test]
     fn lowercase_queries_find_camel_case_types() {
-        let Some((_u, idx)) = index() else {
-            eprintln!("skipping: rust-docs-json not available");
-            return;
-        };
+        let (_u, idx) = index();
         for (query, want) in [
             ("vec", "std::vec::Vec"),
             ("string", "std::string::String"),
