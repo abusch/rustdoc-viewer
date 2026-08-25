@@ -48,23 +48,20 @@ jobs:
         run: |
           rustup toolchain install "$DOCS_JSON_NIGHTLY" \
             --profile minimal --component rust-docs-json
-      # src/load.rs shells out to `rustc +nightly`, so `nightly` has to resolve
-      # to the pinned toolchain or the pin above would have no effect.
-      - name: Alias `nightly` to the pinned toolchain
-        run: |
-          rustup toolchain link nightly \
-            "$(rustc +"$DOCS_JSON_NIGHTLY" --print sysroot)"
       # The docs-JSON tests skip themselves (and pass) when the JSON is
       # missing, so fail loudly here instead of testing nothing.
       - name: Assert the docs JSON is present
         run: |
-          json_dir="$(rustc +nightly --print sysroot)/share/doc/rust/json"
+          json_dir="$(rustc +"$DOCS_JSON_NIGHTLY" --print sysroot)/share/doc/rust/json"
           ls "$json_dir"
           test -f "$json_dir/std.json"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-ubuntu-latest
+      # src/load.rs reads this to decide which toolchain's JSON to load.
       - run: cargo test --locked --all-targets
+        env:
+          RDV_TOOLCHAIN: ${{ env.DOCS_JSON_NIGHTLY }}
 
   lint:
     name: fmt + clippy

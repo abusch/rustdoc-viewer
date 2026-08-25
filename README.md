@@ -14,6 +14,14 @@ The nightly toolchain's `rust-docs-json` component:
 rustup component add rust-docs-json --toolchain nightly
 ```
 
+`rdv` reads the JSON emitted by that component and expects a specific
+rustdoc format version. If your nightly has moved ahead of what this build
+supports, point it at an older toolchain instead of downgrading:
+
+```sh
+RDV_TOOLCHAIN=nightly-2026-08-23 rdv
+```
+
 ## Usage
 
 ```sh

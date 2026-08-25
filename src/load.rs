@@ -16,21 +16,35 @@ use rustdoc_types::Crate;
 /// `core`, and `std` merely re-exports them.
 pub const STD_CRATES: [&str; 3] = ["std", "core", "alloc"];
 
-const INSTALL_HINT: &str =
-    "install it with:\n    rustup component add rust-docs-json --toolchain nightly";
+/// The toolchain whose rustdoc JSON we read, overridable for when the current
+/// nightly has drifted past the format version we support.
+///
+/// A `+toolchain` argument takes precedence over `RUSTUP_TOOLCHAIN`, and rustup
+/// refuses to alias the reserved name `nightly`, so this is the only way to
+/// point the viewer at a specific nightly.
+fn toolchain() -> String {
+    std::env::var("RDV_TOOLCHAIN").unwrap_or_else(|_| "nightly".to_string())
+}
+
+fn install_hint(toolchain: &str) -> String {
+    format!("install it with:\n    rustup component add rust-docs-json --toolchain {toolchain}")
+}
 
 /// Locate the directory holding the nightly toolchain's rustdoc JSON.
 pub fn json_dir() -> Result<PathBuf> {
+    let toolchain = toolchain();
     let out = Command::new("rustc")
-        .args(["+nightly", "--print", "sysroot"])
+        .args([&format!("+{toolchain}"), "--print", "sysroot"])
         .output()
-        .context(
-            "failed to run `rustc +nightly --print sysroot`; is the nightly toolchain installed?",
-        )?;
+        .with_context(|| {
+            format!(
+                "failed to run `rustc +{toolchain} --print sysroot`; is the {toolchain} toolchain installed?"
+            )
+        })?;
 
     if !out.status.success() {
         bail!(
-            "`rustc +nightly --print sysroot` failed: {}",
+            "`rustc +{toolchain} --print sysroot` failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -40,8 +54,9 @@ pub fn json_dir() -> Result<PathBuf> {
 
     if !dir.is_dir() {
         bail!(
-            "rustdoc JSON not found at {};\nthe `rust-docs-json` component is not installed — {INSTALL_HINT}",
-            dir.display()
+            "rustdoc JSON not found at {};\nthe `rust-docs-json` component is not installed — {}",
+            dir.display(),
+            install_hint(&toolchain)
         );
     }
     Ok(dir)
@@ -52,8 +67,9 @@ fn load_one(dir: &Path, name: &str) -> Result<Crate> {
     let path = dir.join(format!("{name}.json"));
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "failed to read {};\nthe `rust-docs-json` component may be incomplete — {INSTALL_HINT}",
-            path.display()
+            "failed to read {};\nthe `rust-docs-json` component may be incomplete — {}",
+            path.display(),
+            install_hint(&toolchain())
         )
     })?;
 
@@ -142,5 +158,18 @@ mod tests {
     fn accepts_our_version() {
         let text = format!(r#"{{"format_version":{}}}"#, rustdoc_types::FORMAT_VERSION);
         assert!(check_format_version(&text, "std").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    /// The override exists so CI can pin a nightly; make sure the default is
+    /// still the plain `nightly` channel.
+    #[test]
+    fn defaults_to_nightly() {
+        // Only meaningful when the caller has not set an override.
+        if std::env::var_os("RDV_TOOLCHAIN").is_none() {
+            assert_eq!(super::toolchain(), "nightly");
+        }
     }
 }
