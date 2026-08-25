@@ -205,7 +205,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         match app.screen {
             Screen::Search => {
-                format!("{} results · ↑↓ select · ⏎ open · ? help · esc quit", app.results.len())
+                format!("{} results · ↑↓ select · ⏎ open · esc back · ? help", app.results.len())
             }
             // The full list of item-view bindings does not fit an 80-column
             // terminal, and this line is truncated rather than wrapped. Drop
@@ -275,7 +275,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("n / p", "next / previous section"),
         ("space", "fold or unfold a section"),
         ("?", "toggle this help"),
-        ("q / esc", "quit"),
+        ("esc", "close search or help"),
+        ("q", "quit"),
     ];
 
     let width = 56u16.min(area.width.saturating_sub(4));

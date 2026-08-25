@@ -93,11 +93,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 fn search_key(app: &mut App, key: KeyEvent, ctrl: bool) {
     match (key.code, ctrl) {
         (KeyCode::Esc, _) => {
-            // Esc returns to the page you were reading, or quits.
+            // Esc dismisses the search and returns to the page behind it.
+            // Only `q` quits, so with no page to go back to it does nothing.
             if app.has_page() {
                 app.screen = Screen::Item;
-            } else {
-                app.should_quit = true;
             }
         }
         (KeyCode::Enter, _) => app.open_selected(),
@@ -122,7 +121,7 @@ fn search_key(app: &mut App, key: KeyEvent, ctrl: bool) {
 fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
     let half = (app.viewport / 2).max(1) as i32;
     match (key.code, ctrl) {
-        (KeyCode::Char('q'), false) | (KeyCode::Esc, _) => app.should_quit = true,
+        (KeyCode::Char('q'), false) => app.should_quit = true,
         (KeyCode::Char('/'), false) => {
             app.screen = Screen::Search;
             app.query.clear();
@@ -194,6 +193,39 @@ mod tests {
         // Plain u leaves the page for its parent.
         press(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
         assert_eq!(a.page.as_ref().unwrap().title, "std::vec");
+    }
+
+    /// Only `q` quits. Esc backs out of whatever is in front, and on the
+    /// item view there is nothing to back out of.
+    #[test]
+    fn esc_does_not_quit() {
+        let Some(mut a) = app() else {
+            eprintln!("skipping: rust-docs-json not available");
+            return;
+        };
+
+        // Item view: Esc is inert.
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.should_quit, "esc should not quit the item view");
+        assert_eq!(a.screen, Screen::Item);
+
+        // Search: Esc dismisses it back to the page.
+        press(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(a.screen, Screen::Search);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.should_quit, "esc should not quit the search");
+        assert_eq!(a.screen, Screen::Item);
+
+        // Help: Esc closes the popup.
+        press(&mut a, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert_eq!(a.screen, Screen::Help);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.should_quit, "esc should not quit the help");
+        assert_eq!(a.screen, Screen::Item);
+
+        // q still quits.
+        press(&mut a, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(a.should_quit, "q should quit");
     }
 
     /// On the search screen `u` is literal text, not a command.
