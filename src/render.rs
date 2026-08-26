@@ -9,6 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use rustdoc_types::{Id, Item};
 
+use crate::theme;
+
 /// A link target discovered while rendering docs, so the UI can follow it.
 ///
 /// A link is addressed by the exact spans it occupies, not merely by its line,
@@ -45,7 +47,7 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(arborium::Highlighter::new()),
-            theme: builtin::monokai(),
+            theme: builtin::catppuccin_mocha(),
         }
     }
 
@@ -199,15 +201,6 @@ fn strip_hidden(code: &str) -> String {
     out
 }
 
-const HEADING: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-const CODE: Style = Style::new().fg(Color::LightGreen);
-const LINK: Style = Style::new()
-    .fg(Color::Cyan)
-    .add_modifier(Modifier::UNDERLINED);
-const QUOTE: Style = Style::new()
-    .fg(Color::DarkGray)
-    .add_modifier(Modifier::ITALIC);
-
 /// Marks a span as belonging to link number `n`.
 ///
 /// Link extents cannot be recorded when the link is emitted: at that point the
@@ -280,7 +273,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                 if !out.lines.is_empty() {
                     out.lines.push(Line::default());
                 }
-                style = HEADING;
+                style = theme::heading();
             }
             Event::End(TagEnd::Heading(_)) => {
                 flush!(String::new());
@@ -332,7 +325,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             Event::Start(Tag::BlockQuote(_)) => {
                 flush!(String::new());
                 quote_depth += 1;
-                style = QUOTE;
+                style = theme::quote();
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 quote_depth = quote_depth.saturating_sub(1);
@@ -346,7 +339,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
             Event::Start(Tag::Link { dest_url, .. }) => {
                 pending_link = Some(dest_url.to_string());
-                style = LINK;
+                style = theme::link();
             }
             Event::End(TagEnd::Link) => {
                 pending_link = None;
@@ -355,9 +348,9 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             Event::Code(text) => {
                 // Inline code may itself be an intra-doc link target.
                 let key = text.to_string();
-                let mut st = CODE;
+                let mut st = theme::inline_code();
                 if let Some(id) = lookup(links, &key, pending_link.as_deref()) {
-                    st = tag(LINK, pending_ids.len());
+                    st = tag(theme::link(), pending_ids.len());
                     pending_ids.push(id);
                 }
                 spans.push(Span::styled(format!("`{key}`"), st));

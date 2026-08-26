@@ -19,6 +19,7 @@ arborium = { version = "2.18.1", features = ["lang-rust"] }
 arborium-highlight = "2.18.1"
 arborium-theme = "2.18.1"
 frizbee = "0.13"
+opaline = { version = "0.4.1", features = ["global-state"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 rustdoc-types = "0.61"

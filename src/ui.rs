@@ -2,14 +2,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, Screen};
 use crate::index::Entry;
-
-const ACCENT: Color = Color::LightMagenta;
+use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -38,15 +36,15 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let input = Paragraph::new(Line::from(vec![
-        Span::styled("  ", Style::new().fg(ACCENT)),
+        Span::styled("  ", theme::accent()),
         Span::raw(app.query.clone()),
-        Span::styled("▏", Style::new().fg(ACCENT)),
+        Span::styled("▏", theme::accent()),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Search ")
-            .border_style(Style::new().fg(ACCENT)),
+            .border_style(theme::focused_border()),
     );
     f.render_widget(input, chunks[0]);
 
@@ -67,10 +65,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.results.is_empty() {
-        lines.push(Line::styled(
-            "  no matches",
-            Style::new().fg(Color::DarkGray),
-        ));
+        lines.push(Line::styled("  no matches", theme::dim()));
     }
 
     f.render_widget(Paragraph::new(lines), list_area);
@@ -78,12 +73,9 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
     let (marker, base) = if selected {
-        (
-            "▸ ",
-            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-        )
+        ("▸ ", theme::selected_name())
     } else {
-        ("  ", Style::new())
+        ("  ", theme::unselected_name())
     };
 
     let kind = kind_badge(&e.kind);
@@ -94,13 +86,10 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
     };
 
     let mut spans = vec![
-        Span::styled(marker, Style::new().fg(ACCENT)),
-        Span::styled(format!("{kind:<9}"), Style::new().fg(Color::Blue)),
-        Span::styled(parent, Style::new().fg(Color::DarkGray)),
-        Span::styled(
-            name,
-            base.fg(if selected { Color::White } else { Color::Gray }),
-        ),
+        Span::styled(marker, theme::accent()),
+        Span::styled(format!("{kind:<9}"), theme::kind_badge()),
+        Span::styled(parent, theme::dim()),
+        Span::styled(name, base),
     ];
     if selected {
         // Pad so the highlight spans the row.
@@ -108,7 +97,7 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         if (used as u16) < width {
             spans.push(Span::raw(" ".repeat(width as usize - used)));
         }
-        return Line::from(spans).style(Style::new().bg(Color::Rgb(40, 40, 55)));
+        return Line::from(spans).style(theme::selected_row());
     }
     Line::from(spans)
 }
@@ -162,7 +151,7 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
         .take(area.height.saturating_sub(2) as usize)
         .map(|(i, l)| {
             if Some(i) == focused_line {
-                let hl = Style::new().bg(Color::Rgb(50, 50, 70));
+                let hl = theme::focused_link();
                 let mut l = l.clone();
                 match focused.and_then(|t| t.spans.clone()) {
                     // A link highlights its own text only, not the line it sits on.
@@ -176,7 +165,7 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
                     None => l.style(hl),
                 }
             } else if Some(i) == cursor_line {
-                l.clone().style(Style::new().bg(Color::Rgb(35, 35, 50)))
+                l.clone().style(theme::cursor_line())
             } else {
                 l.clone()
             }
@@ -192,15 +181,9 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::DarkGray))
-        .title(Line::styled(
-            format!(" {} ", page.title),
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Line::styled(
-            format!(" {pct}% "),
-            Style::new().fg(Color::DarkGray),
-        ));
+        .border_style(theme::unfocused_border())
+        .title(Line::styled(format!(" {} ", page.title), theme::title()))
+        .title_bottom(Line::styled(format!(" {pct}% "), theme::dim()));
 
     f.render_widget(Paragraph::new(visible).block(block), area);
 }
@@ -237,10 +220,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
     };
     f.render_widget(
-        Paragraph::new(Line::styled(
-            format!(" {text}"),
-            Style::new().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Line::styled(format!(" {text}"), theme::status_bar())),
         area,
     );
 }
@@ -307,8 +287,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let mut lines = vec![Line::default()];
     for (key, desc) in entries {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {key:>15}  "), Style::new().fg(ACCENT)),
-            Span::styled(desc.to_string(), Style::new().fg(Color::Gray)),
+            Span::styled(format!("  {key:>15}  "), theme::accent()),
+            Span::styled(desc.to_string(), theme::muted()),
         ]));
     }
 
@@ -318,7 +298,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Keys ")
-                .border_style(Style::new().fg(ACCENT)),
+                .border_style(theme::focused_border()),
         ),
         popup,
     );

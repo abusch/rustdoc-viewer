@@ -9,6 +9,7 @@ mod page;
 mod render;
 #[cfg(test)]
 mod testdocs;
+mod theme;
 mod ui;
 
 use std::time::Duration;
@@ -19,6 +20,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use app::{App, Screen};
 
 fn main() -> Result<()> {
+    theme::init();
+
     // Load before touching the terminal, so errors print normally.
     eprint!("loading rust documentation... ");
     let started = std::time::Instant::now();

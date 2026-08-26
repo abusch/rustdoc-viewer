@@ -1,12 +1,13 @@
 //! Assembling a full item page: declaration, docs, fields, and impl sections.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind, Visibility};
 
 use crate::docs::{ItemRef, Universe};
 use crate::format;
 use crate::render::{self, Highlighter};
+use crate::theme;
 
 /// Which group an impl belongs to, mirroring the docs.rs layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,16 +134,6 @@ const MODULE_KINDS: [(&str, &str); 9] = [
     ("Primitive", "Primitives"),
 ];
 
-const TITLE: Style = Style::new()
-    .fg(Color::LightMagenta)
-    .add_modifier(Modifier::BOLD);
-const SECTION: Style = Style::new()
-    .fg(Color::LightBlue)
-    .add_modifier(Modifier::BOLD);
-const SIG: Style = Style::new().fg(Color::White);
-const DIM: Style = Style::new().fg(Color::DarkGray);
-const WARN: Style = Style::new().fg(Color::LightRed);
-
 /// Collect and group the impls attached to an item.
 pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
     let Some(item) = u.item(r) else {
@@ -241,7 +232,7 @@ pub fn build(
     let Some(item) = u.item(r) else {
         return Page {
             title: "<missing>".into(),
-            lines: vec![Line::styled("item not found", WARN)],
+            lines: vec![Line::styled("item not found", theme::deprecated())],
             section_lines,
             sections,
             targets: Vec::new(),
@@ -260,8 +251,8 @@ pub fn build(
         .map(kind_name)
         .unwrap_or_else(|| inner_name(&item.inner));
     b.push(Line::from(vec![
-        Span::styled(format!("{kind_label} "), DIM),
-        Span::styled(path.clone(), TITLE),
+        Span::styled(format!("{kind_label} "), theme::dim()),
+        Span::styled(path.clone(), theme::title()),
     ]));
 
     if let Some(dep) = &item.deprecation {
@@ -272,14 +263,14 @@ pub fn build(
         if let Some(note) = &dep.note {
             s.push_str(&format!(": {note}"));
         }
-        b.push(Line::styled(s, WARN));
+        b.push(Line::styled(s, theme::deprecated()));
     }
     if let Some(stab) = &item.stability
         && matches!(stab.level, rustdoc_types::StabilityLevel::Unstable)
     {
         b.push(Line::styled(
             format!("Unstable — feature = \"{}\"", stab.feature),
-            Style::new().fg(Color::Yellow),
+            theme::unstable(),
         ));
     }
     b.blank();
@@ -346,10 +337,11 @@ pub fn build(
                 continue;
             };
 
-            b.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format::impl_header(im), SIG.add_modifier(Modifier::BOLD)),
-            ]));
+            // The header is highlighted like the signatures it introduces, and
+            // stays bold so it still reads as their heading.
+            for l in hl_code(&format::impl_header(im), hl) {
+                b.push(indent_line(2, bold(l)));
+            }
 
             // Auto and blanket impls have no methods worth listing.
             if matches!(section.group, ImplGroup::Auto | ImplGroup::Blanket) {
@@ -414,14 +406,17 @@ impl Builder<'_> {
             return;
         }
 
-        self.lines.push(Line::styled(format!("  {title}"), SECTION));
+        self.lines
+            .push(Line::styled(format!("  {title}"), theme::section()));
         for m in members {
             let Some(item) = self.u.item(m) else { continue };
             let sig =
                 format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
             self.targets.push(Target::line(self.lines.len(), m));
-            self.lines
-                .push(Line::from(vec![Span::raw("    "), Span::styled(sig, SIG)]));
+            self.lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(sig, theme::signature()),
+            ]));
             self.push_docs(m, item, 6);
         }
         self.lines.push(Line::default());
@@ -432,8 +427,8 @@ impl Builder<'_> {
     fn push_section_header(&mut self, id: SectionId, is_open: bool, count: usize) {
         let marker = if is_open { "▾" } else { "▸" };
         self.push(Line::from(vec![
-            Span::styled(format!("{marker} {} ", id.title()), SECTION),
-            Span::styled(format!("({count})"), DIM),
+            Span::styled(format!("{marker} {} ", id.title()), theme::section()),
+            Span::styled(format!("({count})"), theme::dim()),
         ]));
     }
 
@@ -517,9 +512,9 @@ impl Builder<'_> {
                 let Some(item) = self.u.item(m) else { continue };
                 let name = item.name.clone().unwrap_or_default();
                 self.targets.push(Target::line(self.lines.len(), m));
-                let mut spans = vec![Span::raw("    "), Span::styled(name, SIG)];
+                let mut spans = vec![Span::raw("    "), Span::styled(name, theme::signature())];
                 if let Some(summary) = summary_line(item) {
-                    spans.push(Span::styled(format!("  {summary}"), DIM));
+                    spans.push(Span::styled(format!("  {summary}"), theme::dim()));
                 }
                 self.push(Line::from(spans));
             }
@@ -532,7 +527,7 @@ impl Builder<'_> {
             return;
         }
         self.lines
-            .push(Line::styled("  Variants".to_string(), SECTION));
+            .push(Line::styled("  Variants".to_string(), theme::section()));
         for id in ids {
             let vref = ItemRef::new(parent.krate, *id);
             let Some(item) = self.u.item(vref) else {
@@ -575,7 +570,7 @@ impl Builder<'_> {
             self.targets.push(Target::line(self.lines.len(), vref));
             self.lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(rendered, SIG),
+                Span::styled(rendered, theme::signature()),
             ]));
             self.push_docs(vref, item, 6);
         }
@@ -584,6 +579,23 @@ impl Builder<'_> {
 }
 
 /// Shift a rendered line right by `n` columns.
+/// Embolden every span of a line, in place of a line-level style.
+///
+/// The spans carry their own colors from the highlighter, and styling each one
+/// keeps the emphasis with them rather than depending on a line style showing
+/// through underneath.
+fn bold(line: Line<'static>) -> Line<'static> {
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|s| {
+                let style = s.style.add_modifier(Modifier::BOLD);
+                s.style(style)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(n))];
     spans.extend(line.spans);
@@ -917,6 +929,49 @@ mod tests {
             page.lines[example].spans.len() > 3,
             "example line is not syntax highlighted: {:?}",
             page.lines[example]
+        );
+    }
+
+    /// Impl headers are declarations too, and are highlighted like the method
+    /// signatures they introduce rather than rendered as one flat span.
+    #[test]
+    fn impl_headers_are_highlighted_and_bold() {
+        let u = universe();
+        let hl = Highlighter::new();
+        let r = u.by_path("alloc::string::String").expect("String");
+        // Trait impls start folded, so ask for the section that carries the
+        // `impl Trait for Type` headers this is about.
+        let expanded = [SectionId::Impls(ImplGroup::Trait)];
+        let page = build(&u, r, 100, &hl, &expanded);
+
+        let header = page
+            .lines
+            .iter()
+            .find(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.trim_start().starts_with("impl ") && text.contains(" for ")
+            })
+            .expect("no trait impl header on String");
+
+        // `impl` and `for` are keywords, so a highlighted header carries several
+        // differently-coloured spans; a flat one would be a single styled span.
+        let coloured: Vec<_> = header
+            .spans
+            .iter()
+            .filter(|s| s.style.fg.is_some())
+            .collect();
+        assert!(
+            coloured.len() > 2,
+            "impl header is not syntax highlighted: {header:?}"
+        );
+
+        // The emphasis lives on the spans themselves, not on a line style that
+        // merely shows through beneath them.
+        assert!(
+            coloured
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "impl header lost its bold: {header:?}"
         );
     }
 
