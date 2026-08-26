@@ -11,7 +11,13 @@ use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    app.last_width = area.width;
+
+    // Lay down the page background before anything else. The tints drawn on
+    // top are defined as steps away from it, so letting cells fall through to
+    // the terminal's own background would measure those steps against an
+    // unknown colour — and against a matching terminal theme the difference
+    // vanishes entirely.
+    f.render_widget(Block::default().style(theme::page()), area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -124,18 +130,54 @@ fn kind_badge(k: &rustdoc_types::ItemKind) -> &'static str {
     }
 }
 
+/// Rows the item view spends on its header before the body starts.
+const HEADER_HEIGHT: u16 = 2;
+
+/// Columns of breathing room down each side of the item view.
+///
+/// Applied to the whole view, header included, so the title lines up with the
+/// text beneath it. The status bar is drawn outside this and keeps the screen
+/// edge, since it reads as chrome rather than as part of the page.
+const SIDE_PADDING: u16 = 2;
+
 fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
-    app.viewport = area.height.saturating_sub(2);
+    // Inset before anything measures the area: the page is built to this
+    // width, and `ensure_width` must be told the same number the lines are
+    // wrapped to or every frame rebuilds the page.
+    let area = Rect {
+        x: area.x + SIDE_PADDING,
+        width: area.width.saturating_sub(SIDE_PADDING * 2),
+        ..area
+    };
+    app.viewport = area.height.saturating_sub(HEADER_HEIGHT);
+    app.last_width = area.width;
     app.ensure_width(area.width);
 
     let Some(page) = &app.page else {
         f.render_widget(
-            Paragraph::new("nothing open — press / to search")
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new("nothing open — press / to search").block(Block::default()),
             area,
         );
         return;
     };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
+        .split(area);
+
+    // The kind and path name the page. They used to be its first body line,
+    // which meant scrolling lost track of what was being read.
+    let mut header = vec![Line::from(vec![
+        Span::styled(format!("{} ", page.kind), theme::dim()),
+        Span::styled(page.title.clone(), theme::title()),
+    ])];
+    header.push(Line::styled(
+        "─".repeat(area.width as usize),
+        theme::unfocused_border(),
+    ));
+    f.render_widget(Paragraph::new(header), chunks[0]);
+    let area = chunks[1];
 
     let focused = app.focus.and_then(|i| page.targets.get(i));
     let focused_line = focused.map(|t| t.line);
@@ -148,7 +190,7 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .skip(start)
-        .take(area.height.saturating_sub(2) as usize)
+        .take(area.height as usize)
         .map(|(i, l)| {
             if Some(i) == focused_line {
                 let hl = theme::focused_link();
@@ -172,23 +214,28 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let pct = if page.lines.is_empty() {
-        100
-    } else {
-        let end = (start + area.height as usize).min(page.lines.len());
-        end * 100 / page.lines.len()
-    };
+    f.render_widget(Paragraph::new(visible), area);
+}
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::unfocused_border())
-        .title(Line::styled(format!(" {} ", page.title), theme::title()))
-        .title_bottom(Line::styled(format!(" {pct}% "), theme::dim()));
-
-    f.render_widget(Paragraph::new(visible).block(block), area);
+/// How far down the page the viewport reaches, as a percentage.
+fn scroll_percent(app: &App) -> Option<usize> {
+    let page = app.page.as_ref()?;
+    if page.lines.is_empty() {
+        return Some(100);
+    }
+    let end = (app.scroll as usize + app.viewport as usize).min(page.lines.len());
+    Some(end * 100 / page.lines.len())
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    // The scroll position lived in the item frame's bottom border; with the
+    // border gone it moves to the right of the status bar.
+    let pct = match app.screen {
+        Screen::Search => None,
+        _ => scroll_percent(app).map(|p| format!("{p}% ")),
+    };
+    let reserved = pct.as_ref().map_or(0, |p| p.chars().count() as u16);
+
     let text = if let Some(s) = &app.status {
         s.clone()
     } else {
@@ -215,7 +262,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     "space fold",
                 ],
                 "? help",
-                area.width.saturating_sub(1),
+                area.width.saturating_sub(1 + reserved),
             ),
         }
     };
@@ -223,6 +270,16 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::styled(format!(" {text}"), theme::status_bar())),
         area,
     );
+
+    if let Some(pct) = pct {
+        let w = pct.chars().count() as u16;
+        let at = Rect {
+            x: area.x + area.width.saturating_sub(w),
+            width: w.min(area.width),
+            ..area
+        };
+        f.render_widget(Paragraph::new(Line::styled(pct, theme::dim())), at);
+    }
 }
 
 /// Join as many `hints` as fit in `width`, always keeping `pinned` last.
@@ -360,17 +417,83 @@ mod tests {
         let buf = term.backend().buffer();
 
         // Find the row carrying the declaration, and confirm it is painted
-        // with the focus background rather than the page background.
+        // with the focus background rather than the page background. The name
+        // has to be matched with its argument list attached: `push_str_slice`
+        // is also on the page and also starts with `fn push_str`.
         let want = theme::focused_link().bg.expect("focus bg");
         let mut found = false;
         for y in 0..buf.area.height {
             let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-            if row.contains("fn push_str") {
+            if row.contains("fn push_str(") {
                 found = true;
                 let bg = buf[(6, y)].bg;
                 assert_eq!(bg, want, "method row {y} is not highlighted: {row:?}");
             }
         }
         assert!(found, "the focused method row was never drawn");
+    }
+
+    /// The item view keeps a margin down each side, and the status bar does
+    /// not: the bar is chrome, and indenting it would leave the screen looking
+    /// like it had lost its left edge.
+    #[test]
+    fn the_item_view_is_padded_but_the_status_bar_is_not() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (u, idx) = crate::testdocs::indexed();
+        let mut app = App::new(u, idx);
+        let m = app
+            .universe
+            .by_path("core::option::Option")
+            .expect("Option");
+        app.navigate_to(m);
+
+        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        term.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer();
+
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let (status, body) = rows.split_last().expect("at least one row");
+
+        // Asserted against a literal margin rather than SIDE_PADDING itself:
+        // driving the loop bounds from the constant would make the test pass
+        // vacuously the moment the padding were removed.
+        const { assert!(SIDE_PADDING >= 1, "the view is meant to carry a margin") };
+        let mut checked = 0;
+        for (y, row) in body.iter().enumerate() {
+            if row.trim().is_empty() {
+                continue;
+            }
+            checked += 1;
+            assert_eq!(
+                buf[(0, y as u16)].symbol(),
+                " ",
+                "row {y} intrudes on the left margin: {row:?}"
+            );
+            assert_eq!(
+                buf[(buf.area.width - 1, y as u16)].symbol(),
+                " ",
+                "row {y} intrudes on the right margin: {row:?}"
+            );
+        }
+        assert!(checked > 0, "no non-blank body rows were drawn");
+
+        // And something must actually reach the first padded column, or the
+        // margin above would be satisfied by an empty screen.
+        assert!(
+            body.iter()
+                .any(|r| r.chars().nth(SIDE_PADDING as usize) != Some(' ')),
+            "nothing was drawn at the content's left edge"
+        );
+
+        // The status bar owns its own single leading space and starts there.
+        assert!(
+            status.starts_with(" /") || status.starts_with(" 0"),
+            "the status bar was indented with the page: {status:?}"
+        );
     }
 }

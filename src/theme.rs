@@ -7,15 +7,21 @@
 //! `const` styles they replace; each is a couple of hash lookups against the
 //! process-wide theme, which is cheap enough to call per rendered span.
 
-use opaline::names::{styles, tokens};
-use opaline::{Theme, load_by_name, set_theme};
+use std::sync::Arc;
+
+use opaline::{
+    Theme, load_by_name,
+    names::{styles, tokens},
+    set_theme,
+};
 use ratatui::style::{Modifier, Style};
 
 /// The theme used unless the app is told otherwise.
 ///
 /// Opaline identifies builtins by kebab-case id, not by the underscored name
 /// of the arborium function that produces the matching syntax theme.
-pub const DEFAULT_THEME: &str = "catppuccin-mocha";
+// pub const DEFAULT_THEME: &str = "catppuccin-mocha";
+pub const DEFAULT_THEME: &str = "catppuccin-latte";
 
 /// Install the default theme as the process-wide active theme.
 ///
@@ -28,7 +34,7 @@ pub fn init() {
 }
 
 /// The active theme.
-fn theme() -> std::sync::Arc<Theme> {
+fn theme() -> Arc<Theme> {
     opaline::current()
 }
 
@@ -76,7 +82,7 @@ pub fn muted() -> Style {
 
 /// A deprecation notice.
 pub fn deprecated() -> Style {
-    style(styles::ERROR_STYLE)
+    style(styles::WARNING_STYLE)
 }
 
 /// An unstable-feature notice: a caveat rather than a defect, so it reads a
@@ -89,12 +95,20 @@ pub fn unstable() -> Style {
 
 /// A markdown heading inside rendered docs.
 pub fn heading() -> Style {
-    fg(tokens::WARNING).add_modifier(Modifier::BOLD)
+    fg(tokens::ACCENT_PRIMARY).add_modifier(Modifier::BOLD)
 }
 
 /// Inline `code` spans.
+///
+/// The theme's own `inline_code` carries a background, which reads as speckle
+/// once whole code blocks are painted with one: a word-sized patch of the
+/// block colour in the middle of a sentence looks like a rendering fault
+/// rather than emphasis. The foreground alone marks it, and the backticks
+/// survive in the text besides.
 pub fn inline_code() -> Style {
-    style(styles::INLINE_CODE)
+    let mut s = style(styles::INLINE_CODE);
+    s.bg = None;
+    s
 }
 
 /// An intra-doc link.
@@ -105,6 +119,40 @@ pub fn link() -> Style {
 /// A block quote.
 pub fn quote() -> Style {
     style(styles::DIMMED).add_modifier(Modifier::ITALIC)
+}
+
+/// The background stripe behind a fenced code block.
+///
+/// Applied to the whole width of every line in the block, gutter included, so
+/// an example reads as one slab rather than as ragged prose.
+pub fn code_block() -> Style {
+    bg(tokens::BG_CODE)
+}
+
+/// The page's own background.
+///
+/// Painted explicitly rather than left to fall through to the terminal's. The
+/// tints below are defined as steps away from *this* colour, so leaving it
+/// unset would make them steps away from whatever the user's terminal happens
+/// to use — and under the matching terminal theme, `bg.panel` is exactly the
+/// terminal's own background, which made [`member_docs`] invisible.
+pub fn page() -> Style {
+    bg(tokens::BG_BASE)
+}
+
+/// The background behind an item's own documentation, distinguishing one
+/// method's description from the next.
+///
+/// A step *lighter* than the page, and the lowest of the three highlight
+/// rungs, so the two that mean something transient — [`cursor_line`] and
+/// [`focused_link`] — both stay brighter than ordinary prose.
+///
+/// Not `bg.code`: a good third of the builtins alias that to `bg.panel`
+/// outright, which would leave a description invisible under those themes the
+/// way `bg.panel` was under Catppuccin. Keeping it off `bg.code` also lets an
+/// example nested in a description read as nested rather than merging with it.
+pub fn member_docs() -> Style {
+    bg(tokens::BG_HIGHLIGHT)
 }
 
 // ── Chrome ───────────────────────────────────────────────────────────────
@@ -146,12 +194,18 @@ pub fn selected_row() -> Style {
 
 /// The highlight on a focused link in the item view.
 pub fn focused_link() -> Style {
-    bg("bg.active")
+    bg(tokens::BG_ACTIVE)
 }
 
 /// The subtler highlight marking the section `space` will fold.
+///
+/// The theme's own `cursor_line` style resolves to `bg.highlight`, which
+/// [`member_docs`] now uses for every line of prose on the page — the cursor
+/// would disappear into it. `bg.elevated` is the next rung up, keeping it
+/// brighter than the documentation it sits among and dimmer than
+/// [`focused_link`], which marks the stronger thing.
 pub fn cursor_line() -> Style {
-    style("cursor_line")
+    bg(tokens::BG_ELEVATED)
 }
 
 /// The status bar along the bottom of the screen.

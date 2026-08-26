@@ -1,7 +1,9 @@
 //! Assembling a full item page: declaration, docs, fields, and impl sections.
 
-use ratatui::style::Modifier;
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Modifier,
+    text::{Line, Span},
+};
 use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind, Visibility};
 
 use crate::docs::{ItemRef, Universe};
@@ -112,12 +114,31 @@ pub struct Section {
 /// A fully rendered page, ready to be scrolled through.
 pub struct Page {
     pub title: String,
+    /// The item's kind ("Enum", "Function"), shown beside the title in the
+    /// header line the item view draws above the scrolling body.
+    pub kind: String,
     pub lines: Vec<Line<'static>>,
     /// Line index of each section header, parallel to `sections`.
     pub section_lines: Vec<usize>,
     pub sections: Vec<SectionId>,
     pub targets: Vec<Target>,
     pub width: u16,
+}
+
+/// The indent ladder every page follows.
+///
+/// Each rung is strictly deeper than the one above it, so an item's
+/// documentation always reads as hanging off the item rather than as prose
+/// that happens to follow it. Impl headers sit a rung above the members they
+/// introduce, which puts a trait's methods at the same depth as an inherent
+/// one's.
+mod indent {
+    /// A section heading (`Variants`, `impl Display for T`).
+    pub const HEADING: usize = 2;
+    /// A member's own line: a signature, a field, a variant.
+    pub const MEMBER: usize = 4;
+    /// The documentation hanging beneath a member.
+    pub const DOCS: usize = 6;
 }
 
 /// Module children are listed in this order, matching the docs.rs layout.
@@ -232,6 +253,7 @@ pub fn build(
     let Some(item) = u.item(r) else {
         return Page {
             title: "<missing>".into(),
+            kind: String::new(),
             lines: vec![Line::styled("item not found", theme::deprecated())],
             section_lines,
             sections,
@@ -246,14 +268,13 @@ pub fn build(
         .unwrap_or_else(|| item.name.clone().unwrap_or_else(|| "?".into()));
 
     // --- Header -----------------------------------------------------------
+    // The kind and path identify the page rather than belonging to its body,
+    // so they are handed to the item view as a fixed header line instead of
+    // scrolling away with the first screenful.
     let kind_label = kind
         .as_ref()
         .map(kind_name)
         .unwrap_or_else(|| inner_name(&item.inner));
-    b.push(Line::from(vec![
-        Span::styled(format!("{kind_label} "), theme::dim()),
-        Span::styled(path.clone(), theme::title()),
-    ]));
 
     if let Some(dep) = &item.deprecation {
         let mut s = String::from("Deprecated");
@@ -273,29 +294,24 @@ pub fn build(
             theme::unstable(),
         ));
     }
-    b.blank();
+    // Only separate the notices from the declaration when there were any: with
+    // the title line gone the body would otherwise open on a blank row.
+    if !b.lines.is_empty() {
+        b.blank();
+    }
 
     // --- Declaration ------------------------------------------------------
     if let Some(sig) = format::signature(item) {
         for l in hl_code(&sig, hl) {
-            b.push(l);
+            b.push(indent_line(indent::HEADING, l));
         }
         b.blank();
     }
 
     // --- Docs -------------------------------------------------------------
-    let rendered = render::item_docs(item, width, hl);
-    let doc_start = b.lines.len();
-    for link in &rendered.links {
-        if let Some(target) = u.resolve(r.krate, link.id) {
-            b.targets.push(Target {
-                line: doc_start + link.line,
-                spans: Some(link.spans.clone()),
-                item: target,
-            });
-        }
-    }
-    b.lines.extend(rendered.lines);
+    // Indented to the same rung as a member's docs, so the page's description
+    // hangs off its declaration the way a method's hangs off its signature.
+    b.push_docs_styled(r, item, indent::HEADING, false);
     b.blank();
 
     // --- Fields / Variants ------------------------------------------------
@@ -340,7 +356,7 @@ pub fn build(
             // The header is highlighted like the signatures it introduces, and
             // stays bold so it still reads as their heading.
             for l in hl_code(&format::impl_header(im), hl) {
-                b.push(indent_line(2, bold(l)));
+                b.push(indent_line(indent::HEADING, bold(l)));
             }
 
             // Auto and blanket impls have no methods worth listing.
@@ -354,9 +370,9 @@ pub fn build(
                     format::signature(m).unwrap_or_else(|| m.name.clone().unwrap_or_default());
                 b.targets.push(Target::line(b.lines.len(), mref));
                 for l in hl_code(&sig, hl) {
-                    b.push(indent_line(4, l));
+                    b.push(indent_line(indent::MEMBER, l));
                 }
-                b.push_docs(mref, m, 6);
+                b.push_docs(mref, m, indent::DOCS);
                 b.blank();
             }
         }
@@ -364,6 +380,7 @@ pub fn build(
 
     Page {
         title: path,
+        kind: kind_label.to_string(),
         lines: b.lines,
         section_lines,
         sections,
@@ -379,6 +396,16 @@ impl Builder<'_> {
     /// page's own docs, so prose wraps, examples keep their syntax
     /// highlighting, and intra-doc links stay navigable.
     fn push_docs(&mut self, r: ItemRef, item: &Item, indent: usize) {
+        self.push_docs_styled(r, item, indent, true);
+    }
+
+    /// As [`Self::push_docs`], but `tint` decides whether the prose carries the
+    /// member-documentation background.
+    ///
+    /// The page's own description passes `false`: the tint exists to separate
+    /// one member's docs from the next, and the item's own docs have nothing
+    /// above or below them to be separated from.
+    fn push_docs_styled(&mut self, r: ItemRef, item: &Item, indent: usize, tint: bool) {
         let rendered = render::item_docs(item, self.width.saturating_sub(indent as u16), self.hl);
         let start = self.lines.len();
         for link in &rendered.links {
@@ -391,8 +418,10 @@ impl Builder<'_> {
                 });
             }
         }
+        let width = self.width;
         for l in rendered.lines {
-            self.lines.push(indent_line(indent, l));
+            let l = indent_line(indent, l);
+            self.lines.push(if tint { tinted(l, width) } else { l });
         }
     }
 
@@ -406,18 +435,20 @@ impl Builder<'_> {
             return;
         }
 
-        self.lines
-            .push(Line::styled(format!("  {title}"), theme::section()));
+        self.lines.push(Line::styled(
+            format!("{:indent$}{title}", "", indent = indent::HEADING),
+            theme::section(),
+        ));
         for m in members {
             let Some(item) = self.u.item(m) else { continue };
             let sig =
                 format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
             self.targets.push(Target::line(self.lines.len(), m));
             self.lines.push(Line::from(vec![
-                Span::raw("    "),
+                Span::raw(" ".repeat(indent::MEMBER)),
                 Span::styled(sig, theme::signature()),
             ]));
-            self.push_docs(m, item, 6);
+            self.push_docs(m, item, indent::DOCS);
         }
         self.lines.push(Line::default());
     }
@@ -512,7 +543,10 @@ impl Builder<'_> {
                 let Some(item) = self.u.item(m) else { continue };
                 let name = item.name.clone().unwrap_or_default();
                 self.targets.push(Target::line(self.lines.len(), m));
-                let mut spans = vec![Span::raw("    "), Span::styled(name, theme::signature())];
+                let mut spans = vec![
+                    Span::raw(" ".repeat(indent::MEMBER)),
+                    Span::styled(name, theme::signature()),
+                ];
                 if let Some(summary) = summary_line(item) {
                     spans.push(Span::styled(format!("  {summary}"), theme::dim()));
                 }
@@ -526,8 +560,10 @@ impl Builder<'_> {
         if ids.is_empty() {
             return;
         }
-        self.lines
-            .push(Line::styled("  Variants".to_string(), theme::section()));
+        self.lines.push(Line::styled(
+            format!("{:indent$}Variants", "", indent = indent::HEADING),
+            theme::section(),
+        ));
         for id in ids {
             let vref = ItemRef::new(parent.krate, *id);
             let Some(item) = self.u.item(vref) else {
@@ -569,10 +605,10 @@ impl Builder<'_> {
             };
             self.targets.push(Target::line(self.lines.len(), vref));
             self.lines.push(Line::from(vec![
-                Span::raw("    "),
+                Span::raw(" ".repeat(indent::MEMBER)),
                 Span::styled(rendered, theme::signature()),
             ]));
-            self.push_docs(vref, item, 6);
+            self.push_docs(vref, item, indent::DOCS);
         }
         self.lines.push(Line::default());
     }
@@ -596,6 +632,35 @@ fn bold(line: Line<'static>) -> Line<'static> {
     )
 }
 
+/// Lay a member's documentation background across the full width of a line.
+///
+/// Padding to `width` is what separates one method's description from the
+/// next: without it the tint would only follow the text and stop at whatever
+/// ragged column the wrap landed on. Spans that already carry a background of
+/// their own — a code block's slab, an inline code span — keep it, so the
+/// tint fills the gaps around them rather than flattening them out.
+fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
+    let bg = theme::member_docs();
+    let mut used = 0usize;
+    let mut spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .map(|s| {
+            used += s.content.chars().count();
+            let style = if s.style.bg.is_some() {
+                s.style
+            } else {
+                s.style.patch(bg)
+            };
+            s.style(style)
+        })
+        .collect();
+    if used < width as usize {
+        spans.push(Span::styled(" ".repeat(width as usize - used), bg));
+    }
+    Line::from(spans)
+}
+
 fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(n))];
     spans.extend(line.spans);
@@ -604,12 +669,9 @@ fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
 
 /// Render a declaration through the syntax highlighter.
 fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
-    let empty = std::collections::HashMap::new();
-    // Route through the markdown renderer so highlighting stays in one place.
-    let md = format!("```rust\n{code}\n```");
-    let mut r = render::markdown(&md, &empty, u16::MAX, hl);
-    r.lines.retain(|l| l.width() > 0);
-    r.lines
+    let mut lines = render::declaration(code, hl);
+    lines.retain(|l| l.width() > 0);
+    lines
 }
 
 fn kind_name(k: &ItemKind) -> &'static str {
@@ -1015,5 +1077,132 @@ mod tests {
         assert!(text.contains("Variants"), "no Variants section");
         assert!(text.contains("None"), "missing None variant");
         assert!(text.contains("Some"), "missing Some variant");
+    }
+
+    /// Text of a line, spans joined.
+    fn text_of(l: &Line<'_>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Columns of leading whitespace on a line.
+    fn indent_of(l: &Line<'_>) -> usize {
+        let t = text_of(l);
+        t.len() - t.trim_start().len()
+    }
+
+    /// An item's documentation must sit deeper than the item it describes,
+    /// which in turn sits deeper than the impl header introducing it.
+    ///
+    /// This used to run backwards for methods: declarations were routed
+    /// through the markdown renderer, which silently added a code block's own
+    /// indent on top of theirs, leaving the prose shallower than the signature
+    /// it belonged to.
+    #[test]
+    fn documentation_is_indented_under_the_item_it_describes() {
+        let u = universe();
+        let hl = Highlighter::new();
+        let r = u.by_path("alloc::string::String").expect("String");
+        // Trait impls exercise the deepest ladder on any page.
+        let expanded = [SectionId::Impls(ImplGroup::Trait)];
+        let page = build(&u, r, 100, &hl, &expanded);
+
+        // Any impl header ends the block before it, `impl String` as much as
+        // `impl Display for String`; a header is the one line on a page that
+        // sits *above* the signatures around it, so missing one would let the
+        // walk below compare a method against the next impl's heading.
+        let is_impl_header = |l: &Line<'_>| {
+            let t = text_of(l);
+            let t = t.trim_start();
+            t.starts_with("impl ") || t.starts_with("impl<")
+        };
+
+        // Find a documented method: many trait impls (`AddAssign for String`)
+        // carry none, and their signature is followed straight by the next
+        // impl header.
+        let mut checked = 0;
+        for (header, _) in page
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_impl_header(l))
+        {
+            assert_eq!(indent_of(&page.lines[header]), indent::HEADING);
+
+            // Everything up to whatever ends this block: the next impl
+            // header, or the next section heading if this was the last impl
+            // in its section.
+            let end = (header + 1..page.lines.len())
+                .find(|&i| is_impl_header(&page.lines[i]) || page.section_lines.contains(&i))
+                .unwrap_or(page.lines.len());
+
+            for sig in header + 1..end {
+                if !text_of(&page.lines[sig]).trim_start().starts_with("fn ") {
+                    continue;
+                }
+                assert_eq!(indent_of(&page.lines[sig]), indent::MEMBER);
+
+                // Prose before the next signature, if this method has any.
+                let Some(docs) = (sig + 1..end)
+                    .take_while(|&i| !text_of(&page.lines[i]).trim_start().starts_with("fn "))
+                    .find(|&i| !text_of(&page.lines[i]).trim().is_empty())
+                else {
+                    continue;
+                };
+                assert!(
+                    indent_of(&page.lines[docs]) > indent_of(&page.lines[sig]),
+                    "docs at {} are shallower than the signature at {}: {:?}",
+                    indent_of(&page.lines[docs]),
+                    indent_of(&page.lines[sig]),
+                    text_of(&page.lines[docs]),
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no documented method under any trait impl");
+    }
+
+    /// A member's description carries a background across the full page width,
+    /// so one method's prose is visibly separate from the next's. Padding to
+    /// the width is the whole point: a tint that stopped at the end of the
+    /// text would leave a ragged edge rather than a block.
+    #[test]
+    fn member_documentation_is_painted_across_the_full_width() {
+        const WIDTH: u16 = 100;
+        let u = universe();
+        let hl = Highlighter::new();
+        let r = u.by_path("core::option::Option").expect("Option");
+        let page = build(&u, r, WIDTH, &hl, &default_expanded());
+
+        let want = theme::member_docs().bg.expect("panel bg");
+        let tinted = page
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.style.bg == Some(want)))
+            .expect("no member documentation carried the panel background");
+
+        assert_eq!(
+            tinted.width(),
+            WIDTH as usize,
+            "tinted line stops short of the width: {:?}",
+            text_of(tinted)
+        );
+        // The page's own top-level docs are not a member's, so they stay plain
+        // — but they are indented to the same rung as one, so the description
+        // hangs off the declaration rather than sitting flush left.
+        let first_prose = page
+            .lines
+            .iter()
+            .find(|l| text_of(l).trim_start().starts_with("The Option"))
+            .expect("no top-level docs");
+        assert!(
+            first_prose.spans.iter().all(|s| s.style.bg.is_none()),
+            "the page's own docs were tinted like a member's"
+        );
+        assert_eq!(
+            indent_of(first_prose),
+            indent::HEADING,
+            "the page's own docs are not indented: {:?}",
+            text_of(first_prose)
+        );
     }
 }

@@ -47,7 +47,8 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(arborium::Highlighter::new()),
-            theme: builtin::catppuccin_mocha(),
+            // theme: builtin::catppuccin_mocha(),
+            theme: builtin::catppuccin_latte(),
         }
     }
 
@@ -298,9 +299,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                 if let Some(code) = in_code.take() {
                     let code = strip_hidden(&code);
                     for line in hl.highlight(&code, code_lang) {
-                        let mut spans = vec![Span::raw("    ")];
-                        spans.extend(line.spans);
-                        out.lines.push(Line::from(spans));
+                        out.lines.push(code_line(line, width));
                     }
                     out.lines.push(Line::default());
                 }
@@ -353,7 +352,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                     st = tag(theme::link(), pending_ids.len());
                     pending_ids.push(id);
                 }
-                spans.push(Span::styled(format!("`{key}`"), st));
+                spans.push(Span::styled(key, st));
             }
             Event::Text(text) => {
                 if let Some(code) = in_code.as_mut() {
@@ -388,7 +387,38 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
     while out.lines.last().is_some_and(|l| l.width() == 0) {
         out.lines.pop();
     }
+
+    // A paragraph closes with a blank line and a heading opens with one, so
+    // the two stack up wherever prose meets a heading. One blank separates
+    // them just as well, and link targets are recorded against line indices,
+    // so the collapse has to carry them along.
+    collapse_blank_runs(&mut out);
     out
+}
+
+/// Squeeze runs of blank lines down to one, moving link targets to match.
+fn collapse_blank_runs(out: &mut Rendered) {
+    // New index of each old line, so link targets can be rewritten.
+    let mut moved = Vec::with_capacity(out.lines.len());
+    let mut kept: Vec<Line<'static>> = Vec::with_capacity(out.lines.len());
+    let mut prev_blank = false;
+
+    for line in std::mem::take(&mut out.lines) {
+        let blank = line.width() == 0;
+        if blank && prev_blank {
+            // Point anything anchored here at the blank line that survived.
+            moved.push(kept.len() - 1);
+            continue;
+        }
+        prev_blank = blank;
+        moved.push(kept.len());
+        kept.push(line);
+    }
+
+    for link in &mut out.links {
+        link.line = moved[link.line];
+    }
+    out.lines = kept;
 }
 
 /// Recover link extents from lines `from..` and clear the tags.
@@ -480,6 +510,44 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
     }
 }
 
+/// Dress one line of a fenced code block: a gutter rule, then the code, then
+/// padding out to `width`.
+///
+/// The background alone would mark the block, but it is a single step off the
+/// page colour and disappears entirely on terminals that override the
+/// background, so the rule carries the same information in glyphs. Padding to
+/// the full width is what makes the run of lines read as one slab instead of a
+/// ragged stripe following the text.
+fn code_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let bg = theme::code_block();
+    let mut spans = vec![
+        Span::styled("┃", theme::dim().patch(bg)),
+        Span::styled(" ", bg),
+    ];
+    let mut used = CODE_GUTTER;
+    for span in line.spans {
+        used += span.content.chars().count();
+        let style = span.style.patch(bg);
+        spans.push(span.style(style));
+    }
+    // Stop the slab at a comfortable reading measure rather than running it to
+    // the window edge: rustdoc examples are written to roughly this width, so
+    // past it the background is empty anyway and only makes the block louder.
+    // A line longer than the cap keeps its own length — cutting the background
+    // mid-code would look like damage.
+    let pad_to = width.min(CODE_BLOCK_WIDTH);
+    if used < pad_to {
+        spans.push(Span::styled(" ".repeat(pad_to - used), bg));
+    }
+    Line::from(spans)
+}
+
+/// Columns [`code_line`] spends on the gutter before the code itself.
+const CODE_GUTTER: usize = 2;
+
+/// Widest a code block's background is painted, gutter included.
+const CODE_BLOCK_WIDTH: usize = 100;
+
 fn prefixed(indent: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
     if indent.is_empty() {
         return Line::from(spans);
@@ -506,6 +574,15 @@ fn split_keeping_spaces(s: &str) -> Vec<String> {
         out.push(buf);
     }
     out
+}
+
+/// Syntax-highlight a declaration, with none of the dressing a fenced block
+/// inside prose gets.
+///
+/// A signature is a heading, not an example: it carries no gutter, no
+/// background, and no indent of its own, so its caller decides where it sits.
+pub fn declaration(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
+    hl.highlight(code, "rs")
 }
 
 /// Convenience: render an item's own docs.
@@ -584,7 +661,7 @@ mod tests {
         links.insert("`None`".to_string(), Id(59));
         let r = markdown("See [`None`] for details.", &links, 60, &hl);
 
-        assert_eq!(link_text(&r, 0), "`None`");
+        assert_eq!(link_text(&r, 0), "None");
         // The surrounding prose must stay outside the highlighted range.
         assert!(r.lines[r.links[0].line].width() > 6);
     }
@@ -598,8 +675,8 @@ mod tests {
         let r = markdown("Either [`Some`] or [`None`] here.", &links, 60, &hl);
 
         assert_eq!(r.links.len(), 2);
-        assert_eq!(link_text(&r, 0), "`Some`");
-        assert_eq!(link_text(&r, 1), "`None`");
+        assert_eq!(link_text(&r, 0), "Some");
+        assert_eq!(link_text(&r, 1), "None");
         assert_eq!(r.links[0].id, Id(1));
         assert_eq!(r.links[1].id, Id(2));
     }
@@ -687,5 +764,171 @@ mod tests {
     fn empty_code_block_does_not_panic() {
         let hl = Highlighter::new();
         assert!(hl.highlight("", "rs").len() <= 1);
+    }
+
+    /// A fenced block is dressed as a slab: every line carries the code
+    /// background out to the full width, with a gutter rule marking its
+    /// extent for terminals that drop the background.
+    #[test]
+    fn code_blocks_are_padded_and_ruled() {
+        const WIDTH: u16 = 60;
+        let hl = Highlighter::new();
+        let r = markdown(
+            "text\n\n```\nlet n = 1;\n```\n",
+            &HashMap::new(),
+            WIDTH,
+            &hl,
+        );
+
+        let bg = theme::code_block().bg.expect("code bg");
+        let code = r
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("let n = 1;")
+            })
+            .expect("no code line");
+
+        assert_eq!(code.width(), WIDTH as usize, "code line was not padded out");
+        assert!(
+            code.spans.iter().all(|s| s.style.bg == Some(bg)),
+            "a span in the code line missed the background"
+        );
+        assert!(
+            WIDTH as usize <= CODE_BLOCK_WIDTH,
+            "this case is meant to render narrower than the cap"
+        );
+        let text: String = code.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("┃ "), "no gutter rule: {text:?}");
+
+        // The prose above it is not code and keeps the page background.
+        let prose = r
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "text"))
+            .expect("no prose line");
+        assert!(prose.spans.iter().all(|s| s.style.bg.is_none()));
+    }
+
+    /// A paragraph ends with a blank line and a heading starts with one, so
+    /// the two used to stack into a double gap wherever prose met a heading.
+    #[test]
+    fn blank_lines_do_not_stack_up() {
+        let hl = Highlighter::new();
+        let r = markdown(
+            "Some prose.\n\n# Examples\n\nMore prose.\n",
+            &HashMap::new(),
+            60,
+            &hl,
+        );
+
+        let blanks: Vec<usize> = r
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.width() == 0)
+            .map(|(i, _)| i)
+            .collect();
+        for pair in blanks.windows(2) {
+            assert!(
+                pair[1] - pair[0] > 1,
+                "consecutive blank lines at {pair:?} in {:?}",
+                r.lines
+                    .iter()
+                    .map(|l| l
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Collapsing blank lines moves every line after them, so link targets
+    /// have to be carried along or they point at the wrong row.
+    #[test]
+    fn collapsing_blanks_keeps_link_targets_on_their_text() {
+        let hl = Highlighter::new();
+        let mut links = HashMap::new();
+        links.insert("`None`".to_string(), Id(59));
+        let r = markdown(
+            "Intro.\n\n# Heading\n\nSee [`None`] here.\n",
+            &links,
+            60,
+            &hl,
+        );
+
+        assert_eq!(r.links.len(), 1);
+        let t = &r.links[0];
+        let text: String = r.lines[t.line].spans[t.spans.clone()]
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "None");
+    }
+
+    /// Past a comfortable reading measure the slab is empty background, so it
+    /// stops rather than running to the window edge.
+    #[test]
+    fn code_block_backgrounds_stop_at_the_reading_measure() {
+        let hl = Highlighter::new();
+        let wide = CODE_BLOCK_WIDTH as u16 * 2;
+        let r = markdown("```\nlet n = 1;\n```\n", &HashMap::new(), wide, &hl);
+
+        let code = r
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("let n = 1;")
+            })
+            .expect("no code line");
+
+        assert_eq!(
+            code.width(),
+            CODE_BLOCK_WIDTH,
+            "the slab did not stop at the cap"
+        );
+    }
+
+    /// A code line longer than the cap keeps its own length: truncating the
+    /// background partway through the code would look like damage.
+    #[test]
+    fn code_longer_than_the_cap_keeps_its_background() {
+        let hl = Highlighter::new();
+        let long = format!("let x = \"{}\";", "y".repeat(CODE_BLOCK_WIDTH));
+        let r = markdown(
+            &format!("```\n{long}\n```\n"),
+            &HashMap::new(),
+            CODE_BLOCK_WIDTH as u16 * 2,
+            &hl,
+        );
+
+        let bg = theme::code_block().bg.expect("code bg");
+        let code = r
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("yyy")
+            })
+            .expect("no code line");
+
+        assert!(code.width() > CODE_BLOCK_WIDTH, "the case did not overflow");
+        assert!(
+            code.spans.iter().all(|s| s.style.bg == Some(bg)),
+            "the background was cut short of the code"
+        );
     }
 }

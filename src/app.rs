@@ -5,6 +5,10 @@ use crate::index::SearchIndex;
 use crate::page::{self, Page, SectionId, Target};
 use crate::render::Highlighter;
 
+/// Narrowest width a page is ever built at, so wrapping stays sane in a
+/// terminal too small to read comfortably anyway.
+const MIN_PAGE_WIDTH: u16 = 20;
+
 /// Which screen is in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -51,7 +55,9 @@ pub struct App {
 
     pub viewport: u16,
     pub status: Option<String>,
-    /// Width of the last frame, used to decide when to re-wrap.
+    /// Width the item view last had room for, used to decide when to re-wrap.
+    /// This is the padded content width, not the terminal's: it must match what
+    /// [`Self::ensure_width`] is given or every frame rebuilds the page.
     pub last_width: u16,
 }
 
@@ -340,14 +346,19 @@ impl App {
 
     /// Re-render if the terminal width changed since the page was built.
     pub fn ensure_width(&mut self, width: u16) {
-        let want = width.saturating_sub(2);
-        if self.page.as_ref().is_some_and(|p| p.width != want) {
+        if self
+            .page
+            .as_ref()
+            .is_some_and(|p| p.width != width.max(MIN_PAGE_WIDTH))
+        {
             self.rebuild_page();
         }
     }
 
+    /// The width pages are built at. The item view has no border, so this is
+    /// the whole terminal; both callers must agree or every frame rebuilds.
     fn page_width(&self) -> u16 {
-        self.last_width.saturating_sub(2).max(20)
+        self.last_width.max(MIN_PAGE_WIDTH)
     }
 
     // --- Scrolling --------------------------------------------------------
