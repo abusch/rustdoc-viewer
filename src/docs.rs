@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use rustdoc_types::{Crate, Id, Item, ItemKind, ItemSummary};
+use rustdoc_types::{Crate, Id, Item, ItemEnum, ItemKind, ItemSummary, Type};
 
 /// Index of a crate within a [`Universe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,6 +46,12 @@ pub struct Universe {
     all_by_path: HashMap<String, Vec<ItemRef>>,
     /// Preferred display path per item, when it differs from the canonical one.
     display: HashMap<ItemRef, String>,
+    /// The type each associated item is declared on, via the impl listing it.
+    ///
+    /// Trait-impl members such as `String`'s `clone` are absent from `paths`
+    /// entirely, so they have neither a path nor a kind to reason about; this
+    /// is the only way to get from one back to the type that carries it.
+    owner: HashMap<ItemRef, ItemRef>,
 }
 
 impl Universe {
@@ -69,13 +75,38 @@ impl Universe {
             }
         }
 
+        // Walk every impl so its members can be traced back to the type they
+        // are shown under, which `paths` does not record.
+        let mut owner = HashMap::new();
+        for (i, krate) in crates.iter().enumerate() {
+            let cid = CrateId(i);
+            for item in krate.index.values() {
+                let ItemEnum::Impl(im) = &item.inner else {
+                    continue;
+                };
+                let Some(for_) = impl_self_id(&im.for_) else {
+                    continue;
+                };
+                let owner_ref = ItemRef::new(cid, for_);
+                for member in &im.items {
+                    owner.insert(ItemRef::new(cid, *member), owner_ref);
+                }
+            }
+        }
+
         Self {
             crates,
             names,
             by_path,
             all_by_path,
             display: HashMap::new(),
+            owner,
         }
+    }
+
+    /// The type an associated item is declared on, if it is one.
+    pub fn owner_of(&self, r: ItemRef) -> Option<ItemRef> {
+        self.owner.get(&r).copied()
     }
 
     /// Record the user-facing spelling for items whose canonical path differs
@@ -199,6 +230,16 @@ impl Universe {
             .find(|r| self.kind_of(**r).is_some_and(is_container))
             .or_else(|| candidates.first())
             .copied()
+    }
+}
+
+/// The id of the type an impl is written for, when it names one.
+fn impl_self_id(t: &Type) -> Option<Id> {
+    match t {
+        Type::ResolvedPath(p) => Some(p.id),
+        // `impl Trait for &T` and friends are shown on `T`'s page.
+        Type::BorrowedRef { type_, .. } => impl_self_id(type_),
+        _ => None,
     }
 }
 

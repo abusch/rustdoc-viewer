@@ -126,12 +126,19 @@ impl App {
     // --- Navigation -------------------------------------------------------
 
     /// Follow a link, pushing onto the history.
+    ///
+    /// A method has no page of its own: it is shown on the page of the type
+    /// that carries it, focused within the impl section that lists it. See
+    /// [`Self::member_of`].
     pub fn navigate_to(&mut self, item: ItemRef) {
+        let member = self.member_of(item);
+        let target = member.map_or(item, |(owner, _)| owner);
+
         self.save_scroll();
         // Following a new link discards any forward history, like a browser.
         self.history.truncate(self.cursor);
         self.history.push(HistoryEntry {
-            item,
+            item: target,
             scroll: 0,
             toggled: page::default_expanded(),
         });
@@ -140,6 +147,103 @@ impl App {
         self.focus = None;
         self.section_cursor = 0;
         self.screen = Screen::Item;
+        self.rebuild_page();
+
+        if let Some((_, method)) = member {
+            self.reveal(method);
+        }
+    }
+
+    /// Resolve an item to the type that carries it, if it is a member.
+    ///
+    /// Two routes, because neither covers everything. Inherent methods are in
+    /// `paths`, so the parent is read from there: that is what distinguishes
+    /// `String::push_str` from `mem::swap`, since both are `Function`s and only
+    /// the parent says which is a member. Trait-impl members such as `String`'s
+    /// `clone` are missing from `paths` altogether — no path, no kind — and are
+    /// found instead through the impl that lists them.
+    fn member_of(&self, item: ItemRef) -> Option<(ItemRef, ItemRef)> {
+        use rustdoc_types::ItemKind as K;
+        let owner = match self.universe.kind_of(item) {
+            Some(K::Function | K::AssocConst | K::AssocType | K::StructField) => {
+                let owner = self.universe.parent_of(item)?;
+                // A module parent means a free function, which keeps its page.
+                matches!(
+                    self.universe.kind_of(owner)?,
+                    K::Struct | K::Enum | K::Union | K::Trait | K::Primitive
+                )
+                .then_some(owner)?
+            }
+            // Not in `paths` at all: only an impl can account for it.
+            None => self.universe.owner_of(item)?,
+            Some(_) => return None,
+        };
+        (owner != item).then_some((owner, item))
+    }
+
+    /// Focus `item` on the page just built, unfolding the section holding it.
+    ///
+    /// The impl sections that list trait methods start folded, so the target
+    /// usually does not exist on the freshly built page; expanding its section
+    /// and rebuilding is what brings it into being.
+    fn reveal(&mut self, item: ItemRef) {
+        if self.focus_on(item) {
+            return;
+        }
+        // Not on the page as built: open each folded section until it appears.
+        let sections: Vec<SectionId> = self
+            .page
+            .as_ref()
+            .map(|p| p.sections.clone())
+            .unwrap_or_default();
+        for id in sections {
+            if page::is_expanded(id, self.toggled()) {
+                continue;
+            }
+            self.toggle_section_id(id);
+            if self.focus_on(item) {
+                return;
+            }
+            // Leave only the section that actually holds the target open.
+            self.toggle_section_id(id);
+        }
+    }
+
+    /// Focus the target for `item` on the current page, scrolling it into view.
+    ///
+    /// A method can be named twice on its owner's page: once by the row that
+    /// declares it, and again by any intra-doc link in prose that happens to
+    /// point at it. The declaration is the one worth landing on, and it is the
+    /// target that owns its whole line, so prefer that over a link's span.
+    fn focus_on(&mut self, item: ItemRef) -> bool {
+        let Some(p) = &self.page else { return false };
+        let Some(i) = target_index(p, item, true) else {
+            return false;
+        };
+        let line = p.targets[i].line as u16;
+        self.focus = Some(i);
+        // Sit the target a third of the way down rather than at the very top,
+        // so the impl header above it stays visible.
+        self.scroll = line.saturating_sub(self.viewport / 3);
+        self.clamp_scroll();
+        true
+    }
+
+    /// The sections toggled away from their default on the current page.
+    fn toggled(&self) -> &[SectionId] {
+        self.current().map(|e| e.toggled.as_slice()).unwrap_or(&[])
+    }
+
+    /// Flip one section's folded state and rebuild.
+    fn toggle_section_id(&mut self, id: SectionId) {
+        if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
+            match entry.toggled.iter().position(|s| *s == id) {
+                Some(i) => {
+                    entry.toggled.remove(i);
+                }
+                None => entry.toggled.push(id),
+            }
+        }
         self.rebuild_page();
     }
 
@@ -194,9 +298,44 @@ impl App {
         };
         let (item, toggled) = (entry.item, entry.toggled.clone());
         let width = self.page_width();
+        // Re-wrapping moves every line, so remember what the focus pointed at
+        // and follow it to wherever it lands; the raw index would otherwise
+        // address a different target, and the scroll a different line.
+        let focused = self
+            .focus
+            .and_then(|f| self.page.as_ref()?.targets.get(f))
+            .map(|t| (t.item, t.line, t.spans.is_none()));
         let page = page::build(&self.universe, item, width, &self.highlighter, &toggled);
         self.page = Some(page);
+
+        if let Some((item, was, decl)) = focused
+            && self.refocus(item, was, decl)
+        {
+            return;
+        }
         self.clamp_scroll();
+    }
+
+    /// Re-point the focus at `item` after a rebuild, keeping it on screen if it
+    /// was before. Returns whether the target was found again.
+    ///
+    /// `decl` carries whether the focus was on the row declaring `item` rather
+    /// than a link to it, since one item can be both and the two sit far apart
+    /// on the page.
+    fn refocus(&mut self, item: ItemRef, was: usize, decl: bool) -> bool {
+        let Some(p) = &self.page else { return false };
+        let Some(i) = target_index(p, item, decl) else {
+            self.focus = None;
+            return false;
+        };
+        let now = p.targets[i].line;
+        self.focus = Some(i);
+        // Keep the target the same distance down the viewport as it was, so a
+        // resize does not jump the page around under the reader.
+        let offset = (was as u16).saturating_sub(self.scroll);
+        self.scroll = (now as u16).saturating_sub(offset);
+        self.clamp_scroll();
+        true
     }
 
     /// Re-render if the terminal width changed since the page was built.
@@ -361,8 +500,11 @@ impl App {
         true
     }
 
-    /// Open the item one level up: the module holding a type, the type holding
-    /// a method.
+    /// Open the item one level up: the module holding a type, or the module
+    /// holding that module.
+    ///
+    /// A method is never the page's own item — it is shown on its type's page —
+    /// so going up from one means going up from the type.
     pub fn go_to_parent(&mut self) {
         let Some(item) = self.current().map(|e| e.item) else {
             return;
@@ -389,6 +531,24 @@ impl App {
     pub fn has_page(&self) -> bool {
         self.page.is_some()
     }
+}
+
+/// The index of the target for `item`, preferring the row that declares it.
+///
+/// An item can be named twice on a page: by the row declaring it, and by any
+/// intra-doc link pointing at it. With `prefer_decl` the declaration wins, which
+/// is what landing on a method should do; a link's own target is used otherwise.
+fn target_index(page: &Page, item: ItemRef, prefer_decl: bool) -> Option<usize> {
+    let matches = |t: &Target| t.item == item;
+    if prefer_decl
+        && let Some(i) = page
+            .targets
+            .iter()
+            .position(|t| matches(t) && t.spans.is_none())
+    {
+        return Some(i);
+    }
+    page.targets.iter().position(matches)
 }
 
 #[cfg(test)]
@@ -538,5 +698,145 @@ mod tests {
 
         a.go_forward();
         assert_eq!(a.page.as_ref().unwrap().title, "std::option::Option");
+    }
+
+    /// A method is shown on its type's page, focused on its declaration,
+    /// rather than getting a bare page of its own.
+    #[test]
+    fn opening_an_inherent_method_lands_on_its_type() {
+        let mut a = app();
+        let m = a
+            .universe
+            .by_path("alloc::string::String::push_str")
+            .expect("String::push_str");
+        a.navigate_to(m);
+
+        let page = a.page.as_ref().expect("a page");
+        assert_eq!(page.title, "std::string::String");
+
+        let line = a
+            .focus
+            .and_then(|f| page.targets.get(f))
+            .map(|t| text_of(&page.lines[t.line]))
+            .expect("no method focused");
+        assert!(
+            line.trim().starts_with("fn push_str"),
+            "focused the wrong line: {line:?}"
+        );
+    }
+
+    /// Trait-impl members are absent from rustdoc's `paths`, so they resolve
+    /// through the impl that lists them, and their section is unfolded to
+    /// bring them into view.
+    #[test]
+    fn opening_a_trait_method_unfolds_its_section() {
+        let mut a = app();
+        let sr = a.universe.by_path("alloc::string::String").expect("String");
+
+        // Find `clone` the way the reader would: on String's page, with the
+        // trait impls open.
+        a.navigate_to(sr);
+        let ids: Vec<SectionId> = a.page.as_ref().unwrap().sections.clone();
+        for id in ids {
+            if !page::is_expanded(id, a.toggled()) {
+                a.toggle_section_id(id);
+            }
+        }
+        let page = a.page.as_ref().unwrap();
+        let clone = page
+            .targets
+            .iter()
+            .find(|t| {
+                t.spans.is_none()
+                    && text_of(&page.lines[t.line]).trim() == "fn clone(&self) -> Self"
+            })
+            .map(|t| t.item)
+            .expect("no clone method on String");
+
+        // Opening it from a fresh app must still land on String, which means
+        // unfolding the section that was closed by default.
+        let mut b = app();
+        b.navigate_to(clone);
+        let page = b.page.as_ref().expect("a page");
+        assert_eq!(page.title, "std::string::String");
+        let line = b
+            .focus
+            .and_then(|f| page.targets.get(f))
+            .map(|t| text_of(&page.lines[t.line]))
+            .expect("no method focused");
+        assert_eq!(line.trim(), "fn clone(&self) -> Self");
+    }
+
+    /// A free function is not a member and keeps its own page, even though
+    /// rustdoc gives it the same `Function` kind as a method.
+    #[test]
+    fn a_free_function_keeps_its_own_page() {
+        let mut a = app();
+        let f = a.universe.by_path("core::mem::swap").expect("mem::swap");
+        a.navigate_to(f);
+
+        let page = a.page.as_ref().expect("a page");
+        assert_eq!(page.title, "std::mem::swap");
+        assert_eq!(a.focus, None, "nothing should be focused on its own page");
+    }
+
+    /// Going back from a method lands where the reader came from, not on the
+    /// method page that no longer exists.
+    #[test]
+    fn history_holds_the_type_a_method_redirected_to() {
+        let mut a = app();
+        let opt = a.universe.by_path("core::option::Option").expect("Option");
+        let m = a
+            .universe
+            .by_path("alloc::string::String::push_str")
+            .expect("String::push_str");
+
+        a.navigate_to(opt);
+        a.navigate_to(m);
+        assert_eq!(a.page.as_ref().unwrap().title, "std::string::String");
+
+        a.go_back();
+        assert_eq!(a.page.as_ref().unwrap().title, "std::option::Option");
+        a.go_forward();
+        assert_eq!(a.page.as_ref().unwrap().title, "std::string::String");
+    }
+
+    /// Flatten a line to its text, for asserting on what was focused.
+    fn text_of(l: &ratatui::text::Line<'static>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Re-wrapping at a new width moves every line, so a focused target must be
+    /// followed to its new position instead of leaving the scroll behind.
+    #[test]
+    fn a_focused_method_survives_a_width_change() {
+        let mut a = app();
+        a.last_width = 80;
+        a.viewport = 25;
+        let m = a
+            .universe
+            .by_path("alloc::string::String::push_str")
+            .expect("String::push_str");
+        a.navigate_to(m);
+
+        let on_screen = |a: &App| {
+            let p = a.page.as_ref().unwrap();
+            let t = &p.targets[a.focus.expect("focused")];
+            let line = t.line as u16;
+            (line >= a.scroll && line < a.scroll + a.viewport)
+                .then(|| text_of(&p.lines[t.line]).trim().to_string())
+        };
+        assert!(
+            on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
+            "not visible before the resize"
+        );
+
+        // Same page, rebuilt for a wider terminal.
+        a.last_width = 140;
+        a.ensure_width(140);
+        assert!(
+            on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
+            "the focused method scrolled off after the resize"
+        );
     }
 }

@@ -338,4 +338,39 @@ mod tests {
         let line = fit_hints(&["⏎ follow", "⇧tab link"], "? help", 30);
         assert!(line.chars().count() <= 30, "{line:?}");
     }
+
+    /// A method opened from search is not just focused in the model: the row
+    /// is actually painted as focused in the rendered frame.
+    #[test]
+    fn an_opened_method_row_is_highlighted_on_screen() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (u, idx) = crate::testdocs::indexed();
+        let mut app = App::new(u, idx);
+        let m = app
+            .universe
+            .by_path("alloc::string::String::push_str")
+            .expect("String::push_str");
+        app.navigate_to(m);
+
+        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        term.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer();
+
+        // Find the row carrying the declaration, and confirm it is painted
+        // with the focus background rather than the page background.
+        let want = theme::focused_link().bg.expect("focus bg");
+        let mut found = false;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains("fn push_str") {
+                found = true;
+                let bg = buf[(6, y)].bg;
+                assert_eq!(bg, want, "method row {y} is not highlighted: {row:?}");
+            }
+        }
+        assert!(found, "the focused method row was never drawn");
+    }
 }
