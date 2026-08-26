@@ -1,15 +1,13 @@
 //! Turning rustdoc markdown and item structures into styled terminal text.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
+use arborium_theme::{HIGHLIGHTS, Theme, builtin};
 use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use rustdoc_types::{Id, Item};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
 /// A link target discovered while rendering docs, so the UI can follow it.
 ///
@@ -33,40 +31,105 @@ pub struct Rendered {
 }
 
 /// Syntax highlighting resources, built once and reused.
+///
+/// Grammars are compiled lazily on first use and then cached, so constructing
+/// this is cheap; the first Rust code block pays the compilation cost.
 pub struct Highlighter {
-    syntaxes: SyntaxSet,
+    /// Arborium needs `&mut` to parse, but rendering only ever holds a shared
+    /// reference to the highlighter, so the parser state lives behind a cell.
+    inner: RefCell<arborium::Highlighter>,
     theme: Theme,
 }
 
 impl Highlighter {
     pub fn new() -> Self {
-        let syntaxes = two_face::syntax::extra_newlines();
-        let theme = ThemeSet::load_defaults().themes["base16-eighties.dark"].clone();
-        Self { syntaxes, theme }
+        Self {
+            inner: RefCell::new(arborium::Highlighter::new()),
+            theme: builtin::monokai(),
+        }
     }
 
     /// Highlight a block of code, returning one styled line per source line.
+    ///
+    /// Only Rust is highlighted; anything else renders as plain text, as does
+    /// code the grammar cannot parse.
     fn highlight(&self, code: &str, lang: &str) -> Vec<Line<'static>> {
-        let syntax = self
-            .syntaxes
-            .find_syntax_by_token(lang)
-            .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text());
-        let mut h = HighlightLines::new(syntax, &self.theme);
+        // Arborium trims trailing newlines itself, so span offsets are relative
+        // to the trimmed source. Trim up front to keep our slicing in step.
+        let code = code.trim_end_matches('\n');
+        let plain = || code.lines().map(|l| Line::from(l.to_string())).collect();
 
-        let mut out = Vec::new();
-        for raw in LinesWithEndings::from(code) {
-            let Ok(ranges) = h.highlight_line(raw, &self.syntaxes) else {
-                out.push(Line::from(raw.trim_end_matches('\n').to_string()));
-                continue;
-            };
-            let spans: Vec<Span<'static>> = ranges
-                .into_iter()
-                .map(|(style, text)| {
-                    Span::styled(text.trim_end_matches('\n').to_string(), convert(style))
-                })
-                .filter(|s| !s.content.is_empty())
-                .collect();
-            out.push(Line::from(spans));
+        // `code_language` speaks rustdoc's fence tokens; arborium wants grammar
+        // names, and Rust is the only grammar we build in.
+        if lang != "rs" {
+            return plain();
+        }
+        let Ok(spans) = self.inner.borrow_mut().highlight_spans("rust", code) else {
+            return plain();
+        };
+        // Raw spans overlap and are unordered; flattening resolves them into a
+        // sorted, disjoint token stream, innermost match winning.
+        let tokens = arborium_highlight::spans_to_flat_tokens(code, spans);
+        if tokens.is_empty() {
+            return plain();
+        }
+
+        let mut lines: Vec<Line<'static>> = vec![Line::default()];
+        // A token may straddle newlines, so text is emitted piecewise and split
+        // wherever it crosses into the next line.
+        let push = |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
+            let mut parts = text.split('\n').peekable();
+            while let Some(part) = parts.next() {
+                if !part.is_empty() {
+                    let line: &mut Line<'static> = lines.last_mut().expect("never empty");
+                    line.push_span(Span::styled(part.to_string(), style));
+                }
+                if parts.peek().is_some() {
+                    lines.push(Line::default());
+                }
+            }
+        };
+
+        // Tokens cover only what the grammar matched; the gaps between them are
+        // ordinary text and still have to be emitted.
+        let mut pos = 0;
+        for token in &tokens {
+            let start = (token.start as usize).min(code.len());
+            let end = (token.end as usize).min(code.len());
+            if start > pos {
+                push(&mut lines, &code[pos..start], Style::default());
+            }
+            if end > start {
+                push(&mut lines, &code[start..end], self.style_for(token.tag));
+            }
+            pos = pos.max(end);
+        }
+        if pos < code.len() {
+            push(&mut lines, &code[pos..], Style::default());
+        }
+        lines
+    }
+
+    /// Look up the theme style for a resolved highlight tag.
+    fn style_for(&self, tag: &str) -> Style {
+        // Tags are theme-slot abbreviations ("k", "cr"); the theme indexes its
+        // styles by position in HIGHLIGHTS, and exposes no direct tag lookup.
+        let Some(index) = HIGHLIGHTS.iter().position(|h| h.tag == tag) else {
+            return Style::default();
+        };
+        let Some(style) = self.theme.style(index) else {
+            return Style::default();
+        };
+
+        let mut out = Style::default();
+        if let Some(c) = style.fg {
+            out = out.fg(Color::Rgb(c.r, c.g, c.b));
+        }
+        if style.modifiers.bold {
+            out = out.add_modifier(Modifier::BOLD);
+        }
+        if style.modifiers.italic {
+            out = out.add_modifier(Modifier::ITALIC);
         }
         out
     }
@@ -76,19 +139,6 @@ impl Default for Highlighter {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Convert a syntect style to a ratatui one.
-fn convert(s: syntect::highlighting::Style) -> Style {
-    let fg = Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b);
-    let mut style = Style::default().fg(fg);
-    if s.font_style.contains(FontStyle::BOLD) {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if s.font_style.contains(FontStyle::ITALIC) {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    style
 }
 
 /// Strip rustdoc's fence annotations and pick a highlighting language.
@@ -596,5 +646,53 @@ mod tests {
         lines.dedup();
         assert_eq!(lines.len(), r.links.len());
         assert!(r.links.iter().all(|t| t.spans.start < t.spans.end));
+    }
+
+    /// Highlighting must be purely additive: styling a block may not add,
+    /// drop, or reorder a single byte of the source.
+    #[test]
+    fn highlighting_preserves_the_source_text() {
+        let hl = Highlighter::new();
+        // A blank interior line is the case most easily lost when splitting
+        // multi-line tokens.
+        let code = "pub fn demo(x: &str) -> Option<u32> {\n    // a comment\n    let n = x.parse().ok()?;\n\n    Some(n + 1)\n}";
+
+        let lines = hl.highlight(code, "rs");
+        assert_eq!(lines.len(), 6, "expected one line per source line");
+
+        let flat: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(flat.join("\n"), code);
+    }
+
+    #[test]
+    fn rust_code_is_highlighted() {
+        let hl = Highlighter::new();
+        let lines = hl.highlight("let n = 1;", "rs");
+        // `let` is a keyword and must be coloured differently from the rest.
+        assert!(
+            lines[0].spans.iter().any(|s| s.style.fg.is_some()),
+            "no span carried a colour: {:?}",
+            lines[0]
+        );
+    }
+
+    /// Rust is the only grammar compiled in, so every other fence renders as
+    /// plain text rather than failing.
+    #[test]
+    fn other_languages_fall_back_to_plain_text() {
+        let hl = Highlighter::new();
+        let lines = hl.highlight("[package]\nname = \"x\"", "toml");
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.spans.len() == 1));
+        assert!(lines.iter().all(|l| l.spans[0].style.fg.is_none()));
+    }
+
+    #[test]
+    fn empty_code_block_does_not_panic() {
+        let hl = Highlighter::new();
+        assert!(hl.highlight("", "rs").len() <= 1);
     }
 }
