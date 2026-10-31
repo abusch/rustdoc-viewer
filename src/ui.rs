@@ -161,7 +161,7 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus.and_then(|i| page.targets.get(i));
     let focused_line = focused.map(|t| t.line);
     // Mark which section `space` will act on.
-    let cursor_line = page.section_lines.get(app.section_cursor).copied();
+    let cursor_line = page.sections.get(app.section_cursor).map(|s| s.line);
 
     let start = app.scroll as usize;
     let visible: Vec<Line> = page

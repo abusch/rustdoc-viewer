@@ -197,7 +197,7 @@ impl App {
         let sections: Vec<SectionId> = self
             .page
             .as_ref()
-            .map(|p| p.sections.clone())
+            .map(|p| p.sections.iter().map(|s| s.id).collect())
             .unwrap_or_default();
         for id in sections {
             if page::is_expanded(id, self.toggled()) {
@@ -397,13 +397,13 @@ impl App {
 
     fn move_section(&mut self, delta: i32) {
         let Some(p) = &self.page else { return };
-        if p.section_lines.is_empty() {
+        if p.sections.is_empty() {
             return;
         }
-        let last = p.section_lines.len() - 1;
+        let last = p.sections.len() - 1;
         let next = (self.section_cursor as i32 + delta).clamp(0, last as i32) as usize;
         self.section_cursor = next;
-        self.scroll = p.section_lines[next] as u16;
+        self.scroll = p.sections[next].line as u16;
         self.clamp_scroll();
     }
 
@@ -414,7 +414,7 @@ impl App {
     /// acts on.
     pub fn toggle_section(&mut self) {
         let Some(p) = &self.page else { return };
-        let Some(section) = p.sections.get(self.section_cursor).copied() else {
+        let Some(section) = p.sections.get(self.section_cursor).map(|s| s.id) else {
             self.status = Some("no section selected — use n/p".into());
             return;
         };
@@ -430,9 +430,9 @@ impl App {
 
         // Keep the toggled header where the eye already is.
         if let Some(p) = &self.page
-            && let Some(l) = p.section_lines.get(self.section_cursor)
+            && let Some(s) = p.sections.get(self.section_cursor)
         {
-            self.scroll = *l as u16;
+            self.scroll = s.line as u16;
             self.clamp_scroll();
         }
     }
@@ -615,7 +615,7 @@ mod tests {
         let sections = a.page.as_ref().unwrap().sections.clone();
         let blanket = sections
             .iter()
-            .position(|g| *g == SectionId::Impls(ImplGroup::Blanket))
+            .position(|s| s.id == SectionId::Impls(ImplGroup::Blanket))
             .expect("blanket section");
 
         let before = a.page.as_ref().unwrap().lines.len();
@@ -744,7 +744,14 @@ mod tests {
         // Find `clone` the way the reader would: on String's page, with the
         // trait impls open.
         a.navigate_to(sr);
-        let ids: Vec<SectionId> = a.page.as_ref().unwrap().sections.clone();
+        let ids: Vec<SectionId> = a
+            .page
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.id)
+            .collect();
         for id in ids {
             if !page::is_expanded(id, a.toggled()) {
                 a.toggle_section_id(id);

@@ -106,10 +106,18 @@ impl Target {
     }
 }
 
-/// A collapsible section of impls.
-pub struct Section {
+/// The impls of one group, in the order the page lists them.
+pub struct ImplSection {
     pub group: ImplGroup,
     pub impls: Vec<ItemRef>,
+}
+
+/// A foldable section as laid out on a page: which one, and the line its
+/// heading landed on, which is where `n`/`p` scroll to.
+#[derive(Debug, Clone, Copy)]
+pub struct Section {
+    pub id: SectionId,
+    pub line: usize,
 }
 
 /// A fully rendered page, ready to be scrolled through.
@@ -119,9 +127,7 @@ pub struct Page {
     /// header line the item view draws above the scrolling body.
     pub kind: String,
     pub lines: Vec<Line<'static>>,
-    /// Line index of each section header, parallel to `sections`.
-    pub section_lines: Vec<usize>,
-    pub sections: Vec<SectionId>,
+    pub sections: Vec<Section>,
     pub targets: Vec<Target>,
     pub width: u16,
 }
@@ -164,7 +170,7 @@ const MODULE_KINDS: [(ItemKind, &str); 13] = [
 ];
 
 /// Collect and group the impls attached to an item.
-pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
+pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<ImplSection> {
     let Some(item) = u.item(r) else {
         return Vec::new();
     };
@@ -177,9 +183,9 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
         _ => return Vec::new(),
     };
 
-    let mut sections: Vec<Section> = ImplGroup::all()
+    let mut sections: Vec<ImplSection> = ImplGroup::all()
         .into_iter()
-        .map(|group| Section {
+        .map(|group| ImplSection {
             group,
             impls: Vec::new(),
         })
@@ -215,25 +221,29 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
 
 /// The context and accumulating output shared by the page-building helpers.
 ///
-/// `u`, `width`, and `hl` are read-only context; `lines` and `targets` are the
-/// page being accumulated. Bundling them keeps the helpers from threading the
-/// same five parameters through every call.
+/// `u`, `width`, `hl`, and `toggled` are read-only context; `lines`,
+/// `targets`, and `sections` are the page being accumulated. Bundling them
+/// keeps the helpers from threading the same parameters through every call.
 struct Builder<'a> {
     u: &'a Universe,
     width: u16,
     hl: &'a Highlighter,
+    toggled: &'a [SectionId],
     lines: Vec<Line<'static>>,
     targets: Vec<Target>,
+    sections: Vec<Section>,
 }
 
 impl<'a> Builder<'a> {
-    fn new(u: &'a Universe, width: u16, hl: &'a Highlighter) -> Self {
+    fn new(u: &'a Universe, width: u16, hl: &'a Highlighter, toggled: &'a [SectionId]) -> Self {
         Self {
             u,
             width,
             hl,
+            toggled,
             lines: Vec::new(),
             targets: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -247,28 +257,27 @@ impl<'a> Builder<'a> {
 }
 
 /// Build the page for an item at a given width.
+///
+/// `toggled` lists the sections flipped away from their default; see
+/// [`is_expanded`].
 pub fn build(
     u: &Universe,
     r: ItemRef,
     width: u16,
     hl: &Highlighter,
-    expanded: &[SectionId],
+    toggled: &[SectionId],
 ) -> Page {
-    let mut b = Builder::new(u, width, hl);
-    let mut section_lines = Vec::new();
-    let mut sections = Vec::new();
-
     let Some(item) = u.item(r) else {
         return Page {
             title: "<missing>".into(),
             kind: String::new(),
             lines: vec![Line::styled("item not found", theme::deprecated())],
-            section_lines,
-            sections,
+            sections: Vec::new(),
             targets: Vec::new(),
             width,
         };
     };
+    let mut b = Builder::new(u, width, hl, toggled);
 
     let path = u
         .path_of(r)
@@ -322,32 +331,24 @@ pub fn build(
     match &item.inner {
         ItemEnum::Struct(s) => {
             if let StructKind::Plain { fields, .. } = &s.kind {
-                b.push_members(r, "Fields", fields);
+                b.push_members(r, "Fields", fields, member_decl);
             }
         }
         ItemEnum::Enum(e) => {
-            b.push_variants(r, &e.variants);
+            b.push_members(r, "Variants", &e.variants, |v| variant_decl(u, r, v));
         }
         ItemEnum::Trait(t) => {
-            b.push_members(r, "Required Methods", &t.items);
+            b.push_members(r, "Required Methods", &t.items, member_decl);
         }
         ItemEnum::Module(m) => {
-            b.push_module_contents(r, &m.items, expanded, &mut section_lines, &mut sections);
+            b.push_module_contents(r, &m.items);
         }
         _ => {}
     }
 
     // --- Impl sections ----------------------------------------------------
     for section in impls_of(u, r) {
-        let id = SectionId::Impls(section.group);
-        let is_open = is_expanded(id, expanded);
-        section_lines.push(b.lines.len());
-        sections.push(id);
-
-        b.push_section_header(id, is_open, section.impls.len());
-
-        if !is_open {
-            b.blank();
+        if !b.open_section(SectionId::Impls(section.group), section.impls.len()) {
             continue;
         }
 
@@ -370,13 +371,7 @@ pub fn build(
             for mid in &im.items {
                 let mref = ItemRef::new(iref.krate, *mid);
                 let Some(m) = u.item(mref) else { continue };
-                let sig =
-                    format::signature(m).unwrap_or_else(|| m.name.clone().unwrap_or_default());
-                b.targets.push(Target::line(b.lines.len(), mref));
-                for l in hl_code(&sig, hl) {
-                    b.push(indent_line(indent::MEMBER, l));
-                }
-                b.push_docs(mref, m, indent::DOCS);
+                b.push_member(mref, m, &member_decl(m));
                 b.blank();
             }
         }
@@ -386,8 +381,7 @@ pub fn build(
         title: path,
         kind: kind_label.to_string(),
         lines: b.lines,
-        section_lines,
-        sections,
+        sections: b.sections,
         targets: b.targets,
         width,
     }
@@ -429,42 +423,66 @@ impl Builder<'_> {
         }
     }
 
-    fn push_members(&mut self, parent: ItemRef, title: &str, ids: &[Id]) {
-        let members: Vec<ItemRef> = ids
+    /// A fixed heading followed by one row per member, each with its docs.
+    ///
+    /// Fields, variants, and required methods are all listed this way; only
+    /// how a member is declared differs, which `decl` supplies.
+    fn push_members(
+        &mut self,
+        parent: ItemRef,
+        title: &str,
+        ids: &[Id],
+        decl: impl Fn(&Item) -> String,
+    ) {
+        let u = self.u;
+        let members: Vec<(ItemRef, &Item)> = ids
             .iter()
             .map(|id| ItemRef::new(parent.krate, *id))
-            .filter(|m| self.u.item(*m).is_some())
+            .filter_map(|m| Some((m, u.item(m)?)))
             .collect();
         if members.is_empty() {
             return;
         }
 
-        self.lines.push(Line::styled(
+        self.push(Line::styled(
             format!("{:indent$}{title}", "", indent = indent::HEADING),
             theme::section(),
         ));
-        for m in members {
-            let Some(item) = self.u.item(m) else { continue };
-            let sig =
-                format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
-            self.targets.push(Target::line(self.lines.len(), m));
-            self.lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent::MEMBER)),
-                Span::styled(sig, theme::signature()),
-            ]));
-            self.push_docs(m, item, indent::DOCS);
+        for (m, item) in members {
+            self.push_member(m, item, &decl(item));
         }
-        self.lines.push(Line::default());
+        self.blank();
     }
 
-    /// A foldable section heading: a marker, the title, and how many members
-    /// it holds.
-    fn push_section_header(&mut self, id: SectionId, is_open: bool, count: usize) {
+    /// One member row: its declaration, highlighted like the page's own, then
+    /// its docs hanging beneath. The row is the member's target, so opening a
+    /// method focuses this line.
+    fn push_member(&mut self, m: ItemRef, item: &Item, decl: &str) {
+        self.targets.push(Target::line(self.lines.len(), m));
+        for l in hl_code(decl, self.hl) {
+            self.push(indent_line(indent::MEMBER, l));
+        }
+        self.push_docs(m, item, indent::DOCS);
+    }
+
+    /// Register a foldable section and draw its heading: a marker, the title,
+    /// and how many members it holds. Returns whether the section is open,
+    /// i.e. whether its body should follow.
+    fn open_section(&mut self, id: SectionId, count: usize) -> bool {
+        let is_open = is_expanded(id, self.toggled);
+        self.sections.push(Section {
+            id,
+            line: self.lines.len(),
+        });
         let marker = if is_open { "▾" } else { "▸" };
         self.push(Line::from(vec![
             Span::styled(format!("{marker} {} ", id.title()), theme::section()),
             Span::styled(format!("({count})"), theme::dim()),
         ]));
+        if !is_open {
+            self.blank();
+        }
+        is_open
     }
 
     /// List a module's children, grouped by kind, one line each.
@@ -473,14 +491,7 @@ impl Builder<'_> {
     /// its name and a one-line summary, the way the docs.rs module index does.
     /// Re-exports are resolved to what they point at, since a `use` item has
     /// no docs of its own and is not worth navigating to.
-    fn push_module_contents(
-        &mut self,
-        parent: ItemRef,
-        ids: &[Id],
-        expanded: &[SectionId],
-        section_lines: &mut Vec<usize>,
-        sections: &mut Vec<SectionId>,
-    ) {
+    fn push_module_contents(&mut self, parent: ItemRef, ids: &[Id]) {
         // Group by kind, keeping each group in the order rustdoc listed it.
         let mut groups: Vec<(&'static str, Vec<ItemRef>)> = MODULE_KINDS
             .iter()
@@ -532,14 +543,7 @@ impl Builder<'_> {
                     .unwrap_or_default()
             });
 
-            let id = SectionId::Module(title);
-            let is_open = is_expanded(id, expanded);
-            section_lines.push(self.lines.len());
-            sections.push(id);
-            self.push_section_header(id, is_open, members.len());
-
-            if !is_open {
-                self.blank();
+            if !self.open_section(SectionId::Module(title), members.len()) {
                 continue;
             }
 
@@ -559,62 +563,52 @@ impl Builder<'_> {
             self.blank();
         }
     }
+}
 
-    fn push_variants(&mut self, parent: ItemRef, ids: &[Id]) {
-        if ids.is_empty() {
-            return;
-        }
-        self.lines.push(Line::styled(
-            format!("{:indent$}Variants", "", indent = indent::HEADING),
-            theme::section(),
-        ));
-        for id in ids {
-            let vref = ItemRef::new(parent.krate, *id);
-            let Some(item) = self.u.item(vref) else {
-                continue;
-            };
-            let ItemEnum::Variant(v) = &item.inner else {
-                continue;
-            };
-            let name = item.name.clone().unwrap_or_default();
-            let rendered = match &v.kind {
-                VariantKind::Plain => name.clone(),
-                VariantKind::Tuple(fields) => {
-                    let tys: Vec<String> = fields
-                        .iter()
-                        .map(|f| {
-                            f.and_then(|fid| self.u.item(ItemRef::new(parent.krate, fid)))
-                                .and_then(|fi| match &fi.inner {
-                                    ItemEnum::StructField(t) => Some(format::ty(t)),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(|| "_".into())
-                        })
-                        .collect();
-                    format!("{name}({})", tys.join(", "))
-                }
-                VariantKind::Struct { fields, .. } => {
-                    let fs: Vec<String> = fields
-                        .iter()
-                        .filter_map(|fid| self.u.item(ItemRef::new(parent.krate, *fid)))
-                        .filter_map(|fi| match &fi.inner {
-                            ItemEnum::StructField(t) => {
-                                Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
-                            }
+/// How a member is declared on its row: its signature, or failing that its name.
+fn member_decl(item: &Item) -> String {
+    format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default())
+}
+
+/// How an enum variant is declared, with its fields' types spelled out.
+///
+/// The variant only holds field ids, so this needs the universe to look the
+/// fields up, which is why it is not one of [`format::signature`]'s arms.
+fn variant_decl(u: &Universe, parent: ItemRef, item: &Item) -> String {
+    let name = item.name.clone().unwrap_or_default();
+    let ItemEnum::Variant(v) = &item.inner else {
+        return name;
+    };
+    let field = |id: Id| u.item(ItemRef::new(parent.krate, id));
+    match &v.kind {
+        VariantKind::Plain => name,
+        VariantKind::Tuple(fields) => {
+            let tys: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    f.and_then(field)
+                        .and_then(|fi| match &fi.inner {
+                            ItemEnum::StructField(t) => Some(format::ty(t)),
                             _ => None,
                         })
-                        .collect();
-                    format!("{name} {{ {} }}", fs.join(", "))
-                }
-            };
-            self.targets.push(Target::line(self.lines.len(), vref));
-            self.lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent::MEMBER)),
-                Span::styled(rendered, theme::signature()),
-            ]));
-            self.push_docs(vref, item, indent::DOCS);
+                        .unwrap_or_else(|| "_".into())
+                })
+                .collect();
+            format!("{name}({})", tys.join(", "))
         }
-        self.lines.push(Line::default());
+        VariantKind::Struct { fields, .. } => {
+            let fs: Vec<String> = fields
+                .iter()
+                .filter_map(|fid| field(*fid))
+                .filter_map(|fi| match &fi.inner {
+                    ItemEnum::StructField(t) => {
+                        Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            format!("{name} {{ {} }}", fs.join(", "))
+        }
     }
 }
 
@@ -866,18 +860,13 @@ mod tests {
         let page = build(&u, root, 100, &hl, &default_expanded());
 
         // A module page's listings register as sections, so n/p steps them.
-        let titles: Vec<&str> = page.sections.iter().map(|s| s.title()).collect();
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.id.title()).collect();
         assert!(titles.contains(&"Modules"), "got {titles:?}");
         assert!(titles.contains(&"Macros"), "got {titles:?}");
-        assert_eq!(page.sections.len(), page.section_lines.len());
 
         // Every registered section heading really is at the line claimed.
-        for (id, line) in page.sections.iter().zip(&page.section_lines) {
-            let t: String = page.lines[*line]
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+        for Section { id, line } in &page.sections {
+            let t = text_of(&page.lines[*line]);
             assert!(
                 t.contains(id.title()),
                 "line {line} is not {:?}: {t:?}",
@@ -895,7 +884,7 @@ mod tests {
             page.lines.len(),
             folded.lines.len()
         );
-        let titles: Vec<&str> = folded.sections.iter().map(|s| s.title()).collect();
+        let titles: Vec<&str> = folded.sections.iter().map(|s| s.id.title()).collect();
         assert!(
             titles.contains(&"Modules"),
             "heading should survive folding"
@@ -1114,7 +1103,9 @@ mod tests {
             // header, or the next section heading if this was the last impl
             // in its section.
             let end = (header + 1..page.lines.len())
-                .find(|&i| is_impl_header(&page.lines[i]) || page.section_lines.contains(&i))
+                .find(|&i| {
+                    is_impl_header(&page.lines[i]) || page.sections.iter().any(|s| s.line == i)
+                })
                 .unwrap_or(page.lines.len());
 
             for sig in header + 1..end {
