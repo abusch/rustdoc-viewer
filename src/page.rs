@@ -315,7 +315,7 @@ pub fn build(
 
     // --- Declaration ------------------------------------------------------
     if let Some(sig) = format::signature(item) {
-        for l in hl_code(&sig, hl) {
+        for l in render::declaration(&sig, hl) {
             b.push(indent_line(indent::HEADING, l));
         }
         b.blank();
@@ -360,7 +360,7 @@ pub fn build(
 
             // The header is highlighted like the signatures it introduces, and
             // stays bold so it still reads as their heading.
-            for l in hl_code(&format::impl_header(im), hl) {
+            for l in render::declaration(&format::impl_header(im), hl) {
                 b.push(indent_line(indent::HEADING, bold(l)));
             }
 
@@ -459,7 +459,7 @@ impl Builder<'_> {
     /// method focuses this line.
     fn push_member(&mut self, m: ItemRef, item: &Item, decl: &str) {
         self.targets.push(Target::line(self.lines.len(), m));
-        for l in hl_code(decl, self.hl) {
+        for l in render::declaration(decl, self.hl) {
             self.push(indent_line(indent::MEMBER, l));
         }
         self.push_docs(m, item, indent::DOCS);
@@ -638,12 +638,10 @@ fn bold(line: Line<'static>) -> Line<'static> {
 /// tint fills the gaps around them rather than flattening them out.
 fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
     let bg = theme::member_docs();
-    let mut used = 0usize;
-    let mut spans: Vec<Span<'static>> = line
+    let spans: Vec<Span<'static>> = line
         .spans
         .into_iter()
         .map(|s| {
-            used += s.content.chars().count();
             let style = if s.style.bg.is_some() {
                 s.style
             } else {
@@ -652,10 +650,7 @@ fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
             s.style(style)
         })
         .collect();
-    if used < width as usize {
-        spans.push(Span::styled(" ".repeat(width as usize - used), bg));
-    }
-    Line::from(spans)
+    render::pad_to(Line::from(spans), width as usize, bg)
 }
 
 /// Shift a rendered line right by `n` columns.
@@ -663,13 +658,6 @@ fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(n))];
     spans.extend(line.spans);
     Line::from(spans)
-}
-
-/// Render a declaration through the syntax highlighter.
-fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
-    let mut lines = render::declaration(code, hl);
-    lines.retain(|l| l.width() > 0);
-    lines
 }
 
 /// Whether an item belongs in a module listing.

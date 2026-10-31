@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use arborium_theme::{HIGHLIGHTS, Theme, builtin};
+use arborium_theme::{HIGHLIGHTS, Theme};
 use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -47,34 +47,26 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(arborium::Highlighter::new()),
-            // theme: builtin::catppuccin_mocha(),
-            theme: builtin::catppuccin_latte(),
+            theme: theme::syntax(),
         }
     }
 
-    /// Highlight a block of code, returning one styled line per source line.
+    /// Highlight Rust code, returning one styled line per source line.
     ///
-    /// Only Rust is highlighted; anything else renders as plain text, as does
-    /// code the grammar cannot parse.
-    fn highlight(&self, code: &str, lang: &str) -> Vec<Line<'static>> {
+    /// Rust is the only grammar built in. Code it cannot parse falls back to
+    /// [`plain`].
+    fn highlight(&self, code: &str) -> Vec<Line<'static>> {
         // Arborium trims trailing newlines itself, so span offsets are relative
         // to the trimmed source. Trim up front to keep our slicing in step.
         let code = code.trim_end_matches('\n');
-        let plain = || code.lines().map(|l| Line::from(l.to_string())).collect();
-
-        // `code_language` speaks rustdoc's fence tokens; arborium wants grammar
-        // names, and Rust is the only grammar we build in.
-        if lang != "rs" {
-            return plain();
-        }
         let Ok(spans) = self.inner.borrow_mut().highlight_spans("rust", code) else {
-            return plain();
+            return plain(code);
         };
         // Raw spans overlap and are unordered; flattening resolves them into a
         // sorted, disjoint token stream, innermost match winning.
         let tokens = arborium_highlight::spans_to_flat_tokens(code, spans);
         if tokens.is_empty() {
-            return plain();
+            return plain(code);
         }
 
         let mut lines: Vec<Line<'static>> = vec![Line::default()];
@@ -144,42 +136,27 @@ impl Default for Highlighter {
     }
 }
 
-/// Strip rustdoc's fence annotations and pick a highlighting language.
+/// Code as unstyled lines, for anything that is not Rust.
+fn plain(code: &str) -> Vec<Line<'static>> {
+    code.trim_end_matches('\n')
+        .lines()
+        .map(|l| Line::from(l.to_string()))
+        .collect()
+}
+
+/// Whether a fenced block is Rust, judging by its info string.
 ///
 /// Rustdoc fences carry attributes rather than a language — ```` ```ignore
-/// (needs windows) ````, ```` ```no_run ````, ```` ```should_panic ````. Any
-/// token that is not a known language means "this is still Rust", which is
-/// rustdoc's own default for an unannotated block.
-pub fn code_language(info: &str) -> &'static str {
-    const ATTRS: [&str; 10] = [
-        "ignore",
-        "no_run",
-        "should_panic",
-        "compile_fail",
-        "edition2015",
-        "edition2018",
-        "edition2021",
-        "edition2024",
-        "test_harness",
-        "standalone_crate",
+/// (needs windows) ````, ```` ```no_run ````, ```` ```should_panic ```` — and
+/// rustdoc treats any block not naming another language as Rust. So only a
+/// known other language rules it out.
+fn is_rust(info: &str) -> bool {
+    const OTHER_LANGUAGES: [&str; 13] = [
+        "text", "txt", "toml", "json", "sh", "bash", "shell", "console", "c", "cpp", "c++",
+        "python", "py",
     ];
-
     let first = info.trim().split([',', ' ']).next().unwrap_or("").trim();
-    if first.is_empty() || ATTRS.contains(&first) || first.starts_with("edition") {
-        return "rs";
-    }
-    match first {
-        "rust" | "rs" => "rs",
-        "text" | "txt" => "txt",
-        "toml" => "toml",
-        "json" => "json",
-        "sh" | "bash" | "shell" | "console" => "sh",
-        "c" => "c",
-        "cpp" | "c++" => "cpp",
-        "python" | "py" => "py",
-        // Unknown annotation: rustdoc still treats the block as Rust.
-        _ => "rs",
-    }
+    !OTHER_LANGUAGES.contains(&first)
 }
 
 /// Drop rustdoc's hidden lines (`# ...`), matching what the website shows.
@@ -219,7 +196,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
     let mut style = Style::default();
     let mut list_depth: usize = 0;
     let mut in_code: Option<String> = None;
-    let mut code_lang = "rs";
+    let mut code_is_rust = true;
     let mut quote_depth = 0usize;
     let mut pending_link: Option<String> = None;
 
@@ -260,16 +237,21 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 flush(&mut out, &mut run, width, "");
-                code_lang = match &kind {
-                    CodeBlockKind::Fenced(info) => code_language(info),
-                    CodeBlockKind::Indented => "rs",
+                code_is_rust = match &kind {
+                    CodeBlockKind::Fenced(info) => is_rust(info),
+                    CodeBlockKind::Indented => true,
                 };
                 in_code = Some(String::new());
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(code) = in_code.take() {
                     let code = strip_hidden(&code);
-                    for line in hl.highlight(&code, code_lang) {
+                    let lines = if code_is_rust {
+                        hl.highlight(&code)
+                    } else {
+                        plain(&code)
+                    };
+                    for line in lines {
                         out.lines.push(code_line(line, width));
                     }
                     out.lines.push(Line::default());
@@ -340,10 +322,8 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             }
             Event::Rule => {
                 flush(&mut out, &mut run, width, "");
-                out.lines.push(Line::styled(
-                    "─".repeat(width.min(60)),
-                    Style::new().fg(Color::DarkGray),
-                ));
+                out.lines
+                    .push(Line::styled("─".repeat(width.min(60)), theme::rule()));
             }
             _ => {}
         }
@@ -484,26 +464,28 @@ fn code_line(line: Line<'static>, width: usize) -> Line<'static> {
         Span::styled("┃", theme::dim().patch(bg)),
         Span::styled(" ", bg),
     ];
-    let mut used = CODE_GUTTER;
-    for span in line.spans {
-        used += span.content.chars().count();
-        let style = span.style.patch(bg);
-        spans.push(span.style(style));
-    }
+    spans.extend(line.spans.into_iter().map(|s| {
+        let style = s.style.patch(bg);
+        s.style(style)
+    }));
     // Stop the slab at a comfortable reading measure rather than running it to
     // the window edge: rustdoc examples are written to roughly this width, so
     // past it the background is empty anyway and only makes the block louder.
     // A line longer than the cap keeps its own length — cutting the background
     // mid-code would look like damage.
-    let pad_to = width.min(CODE_BLOCK_WIDTH);
-    if used < pad_to {
-        spans.push(Span::styled(" ".repeat(pad_to - used), bg));
-    }
-    Line::from(spans)
+    pad_to(Line::from(spans), width.min(CODE_BLOCK_WIDTH), bg)
 }
 
-/// Columns [`code_line`] spends on the gutter before the code itself.
-const CODE_GUTTER: usize = 2;
+/// Pad a line with spaces in `style` out to `width` columns, so a background
+/// reads as one block rather than stopping at the text's ragged end. A line
+/// already that wide is left alone.
+pub fn pad_to(mut line: Line<'static>, width: usize, style: Style) -> Line<'static> {
+    let used = line.width();
+    if used < width {
+        line.push_span(Span::styled(" ".repeat(width - used), style));
+    }
+    line
+}
 
 /// Widest a code block's background is painted, gutter included.
 const CODE_BLOCK_WIDTH: usize = 100;
@@ -531,9 +513,12 @@ fn split_keeping_spaces(s: &str) -> Vec<String> {
 /// inside prose gets.
 ///
 /// A signature is a heading, not an example: it carries no gutter, no
-/// background, and no indent of its own, so its caller decides where it sits.
+/// background, no indent of its own, and no blank lines, so it sits as one
+/// compact block wherever its caller puts it.
 pub fn declaration(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
-    hl.highlight(code, "rs")
+    let mut lines = hl.highlight(code);
+    lines.retain(|l| l.width() > 0);
+    lines
 }
 
 /// Convenience: render an item's own docs.
@@ -548,18 +533,23 @@ pub fn item_docs(item: &Item, width: u16, hl: &Highlighter) -> Rendered {
 mod tests {
     use super::*;
 
+    /// Rustdoc's fence attributes and unknown annotations still mean Rust;
+    /// only a named other language does not.
     #[test]
-    fn strips_rustdoc_fence_attributes() {
-        assert_eq!(code_language(""), "rs");
-        assert_eq!(code_language("ignore (needs windows)"), "rs");
-        assert_eq!(code_language("no_run"), "rs");
-        assert_eq!(code_language("should_panic"), "rs");
-        assert_eq!(code_language("compile_fail,edition2021"), "rs");
-        assert_eq!(code_language("edition2024"), "rs");
-        assert_eq!(code_language("text"), "txt");
-        assert_eq!(code_language("toml"), "toml");
-        // An unknown annotation still means Rust, per rustdoc's default.
-        assert_eq!(code_language("weird_attr"), "rs");
+    fn fences_are_rust_unless_they_name_another_language() {
+        for info in [
+            "",
+            "rust",
+            "ignore (needs windows)",
+            "no_run",
+            "compile_fail,edition2021",
+            "weird_attr",
+        ] {
+            assert!(is_rust(info), "{info:?} should be Rust");
+        }
+        for info in ["text", "toml", "sh", "console"] {
+            assert!(!is_rust(info), "{info:?} should not be Rust");
+        }
     }
 
     #[test]
@@ -654,7 +644,7 @@ mod tests {
         // multi-line tokens.
         let code = "pub fn demo(x: &str) -> Option<u32> {\n    // a comment\n    let n = x.parse().ok()?;\n\n    Some(n + 1)\n}";
 
-        let lines = hl.highlight(code, "rs");
+        let lines = hl.highlight(code);
         assert_eq!(lines.len(), 6, "expected one line per source line");
 
         let flat: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -664,7 +654,7 @@ mod tests {
     #[test]
     fn rust_code_is_highlighted() {
         let hl = Highlighter::new();
-        let lines = hl.highlight("let n = 1;", "rs");
+        let lines = hl.highlight("let n = 1;");
         // `let` is a keyword and must be coloured differently from the rest.
         assert!(
             lines[0].spans.iter().any(|s| s.style.fg.is_some()),
@@ -673,21 +663,30 @@ mod tests {
         );
     }
 
-    /// Rust is the only grammar compiled in, so every other fence renders as
-    /// plain text rather than failing.
+    /// A fence naming another language renders as plain text rather than
+    /// being run through the Rust grammar.
     #[test]
-    fn other_languages_fall_back_to_plain_text() {
+    fn other_languages_render_unhighlighted() {
         let hl = Highlighter::new();
-        let lines = hl.highlight("[package]\nname = \"x\"", "toml");
-        assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.spans.len() == 1));
-        assert!(lines.iter().all(|l| l.spans[0].style.fg.is_none()));
+        let r = markdown(
+            "```toml\n[package]\nname = \"x\"\n```\n",
+            &HashMap::new(),
+            60,
+            &hl,
+        );
+        let code = r
+            .lines
+            .iter()
+            .find(|l| l.to_string().contains("[package]"))
+            .expect("no code line");
+        // Gutter, its space, the text, and the padding: no per-token spans.
+        assert_eq!(code.spans.len(), 4, "{code:?}");
     }
 
     #[test]
     fn empty_code_block_does_not_panic() {
         let hl = Highlighter::new();
-        assert!(hl.highlight("", "rs").len() <= 1);
+        assert!(hl.highlight("").len() <= 1);
     }
 
     /// A fenced block is dressed as a slab: every line carries the code
@@ -736,9 +735,9 @@ mod tests {
 
         assert_eq!(width("let n = 1;", 60), 60, "not padded to the page");
         assert_eq!(width("let n = 1;", CODE_BLOCK_WIDTH * 2), CODE_BLOCK_WIDTH);
-        assert_eq!(
-            width(&long, CODE_BLOCK_WIDTH * 2),
-            CODE_BLOCK_WIDTH + CODE_GUTTER
+        assert!(
+            width(&long, CODE_BLOCK_WIDTH * 2) > CODE_BLOCK_WIDTH,
+            "long code was cut"
         );
     }
 

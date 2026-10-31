@@ -2,12 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, Screen};
 use crate::index::Entry;
 use crate::kind;
+use crate::render;
 use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -92,7 +94,7 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         None => (String::new(), e.path.clone()),
     };
 
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(marker, theme::accent()),
         Span::styled(format!("{kind:<9}"), theme::kind_badge()),
         Span::styled(parent, theme::dim()),
@@ -100,11 +102,8 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
     ];
     if selected {
         // Pad so the highlight spans the row.
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if (used as u16) < width {
-            spans.push(Span::raw(" ".repeat(width as usize - used)));
-        }
-        return Line::from(spans).style(theme::selected_row());
+        let line = render::pad_to(Line::from(spans), width as usize, Style::default());
+        return line.style(theme::selected_row());
     }
     Line::from(spans)
 }

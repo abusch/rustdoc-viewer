@@ -23,6 +23,21 @@ use ratatui::style::{Modifier, Style};
 // pub const DEFAULT_THEME: &str = "catppuccin-mocha";
 pub const DEFAULT_THEME: &str = "catppuccin-latte";
 
+/// The syntax-highlighting theme matching [`DEFAULT_THEME`], so code and
+/// chrome always come from the same palette.
+///
+/// Arborium names its themes for display ("Catppuccin Latte") where opaline
+/// uses kebab-case ids, so the id is derived from the name rather than kept as
+/// a second setting that could drift. Falls back to Catppuccin Mocha, the
+/// default of both, when arborium has no theme by that id.
+pub fn syntax() -> arborium_theme::Theme {
+    let builtin = arborium_theme::builtin::all();
+    builtin
+        .into_iter()
+        .find(|t| t.name.to_lowercase().replace(' ', "-") == DEFAULT_THEME)
+        .unwrap_or_else(arborium_theme::builtin::catppuccin_mocha)
+}
+
 /// Install the default theme as the process-wide active theme.
 ///
 /// Falls back to opaline's own default if the named theme is somehow missing,
@@ -114,6 +129,12 @@ pub fn inline_code() -> Style {
 /// An intra-doc link.
 pub fn link() -> Style {
     fg(tokens::INFO).add_modifier(Modifier::UNDERLINED)
+}
+
+/// A horizontal rule (`---`) between passages of docs: a divider, drawn like
+/// the border of a panel that does not have focus.
+pub fn rule() -> Style {
+    fg(tokens::BORDER_UNFOCUSED)
 }
 
 /// A block quote.
@@ -228,6 +249,14 @@ mod tests {
         );
     }
 
+    /// The syntax theme is found by name, not just defaulted: a mismatch
+    /// would highlight code in one palette and draw everything else in another.
+    #[test]
+    fn the_syntax_theme_matches_the_default_theme() {
+        let name = syntax().name.to_lowercase().replace(' ', "-");
+        assert_eq!(name, DEFAULT_THEME);
+    }
+
     /// Every style this module exposes must resolve to a real color rather than
     /// falling back to a default, which is how a mistyped token name shows up.
     #[test]
@@ -245,6 +274,7 @@ mod tests {
             ("inline_code", inline_code()),
             ("link", link()),
             ("quote", quote()),
+            ("rule", rule()),
             ("code_block", code_block()),
             ("page", page()),
             ("member_docs", member_docs()),

@@ -134,13 +134,14 @@ until its section is opened.
 All styling goes through `theme.rs`, which resolves opaline's semantic tokens
 (`accent.primary`, `text.dim`, `bg.highlight`) and named styles (`dimmed`,
 `inline_code`, `focused_border`). **Do not write `Color::*` literals in UI code**
-— add a named style to `theme.rs` instead. Both opaline and arborium default to
-Catppuccin Mocha.
+— add a named style to `theme.rs` instead.
 
-Opaline identifies builtin themes by *kebab*-case id (`catppuccin-mocha`), while
-arborium's function is `catppuccin_mocha()`. Getting the id wrong falls back to
-opaline's default silently — everything still renders, just in the wrong colors,
-which is why `theme.rs` has a test asserting the named theme loads.
+`theme::DEFAULT_THEME` is the one setting: an opaline *kebab*-case id
+(`catppuccin-mocha`). The syntax theme is derived from it — `theme::syntax`
+finds the arborium theme whose display name ("Catppuccin Mocha") kebab-cases to
+that id — so switching themes is a one-line change. Getting the id wrong falls
+back silently — everything still renders, just in the wrong colors — which is
+why `theme.rs` tests that both the opaline and the arborium theme are found.
 
 Themes load at runtime, so styles are functions, not `const`s.
 
