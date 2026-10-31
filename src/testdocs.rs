@@ -6,6 +6,7 @@
 //! panic with the install hint rather than skipping, so a test that cannot run
 //! is reported as a failure instead of a pass.
 
+use crate::app::App;
 use crate::docs::Universe;
 use crate::index::SearchIndex;
 use crate::load;
@@ -27,4 +28,18 @@ pub fn indexed() -> (Universe, SearchIndex) {
     let u = universe();
     let idx = SearchIndex::build(&u);
     (u, idx)
+}
+
+/// An app on its landing page.
+pub fn app() -> App {
+    let (u, idx) = indexed();
+    App::new(u, idx)
+}
+
+/// An app showing the item at canonical `path`.
+pub fn app_on(path: &str) -> App {
+    let mut a = app();
+    let r = a.universe.by_path(path).expect(path);
+    a.navigate_to(r);
+    a
 }

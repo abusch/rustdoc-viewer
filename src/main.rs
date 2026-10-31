@@ -163,11 +163,7 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn app() -> App {
-        let (u, idx) = crate::testdocs::indexed();
-        App::new(u, idx)
-    }
+    use crate::testdocs::{app, app_on};
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         app.status = None;
@@ -178,9 +174,7 @@ mod tests {
     /// to the parent item, the other scrolls half a page.
     #[test]
     fn u_goes_up_while_ctrl_u_scrolls() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
 
         // ^u scrolls within the page, leaving the item alone.
         a.scroll_by(40);
@@ -224,32 +218,24 @@ mod tests {
         assert!(a.should_quit, "q should quit");
     }
 
-    /// n/p and space work on a module page's listings, not just on impls.
+    /// n/p step the section cursor and space toggles the section under it.
+    /// What folding does to the page is the page's and app's business; this
+    /// only checks the keys reach it. The landing page is std's root, so this
+    /// also covers module listings rather than just impls.
     #[test]
-    fn module_sections_step_and_fold() {
+    fn n_p_and_space_drive_the_section_cursor() {
         let mut a = app();
-        let root = a.universe.root().expect("std root");
-        a.navigate_to(root);
-        assert!(
-            !a.page.as_ref().unwrap().sections.is_empty(),
-            "std's root page should have sections"
-        );
+        let section = |a: &App| a.page.as_ref().unwrap().sections[a.section_cursor].id;
 
-        // n steps to the next section and scrolls it into view.
         press(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         assert_eq!(a.section_cursor, 1);
         press(&mut a, KeyCode::Char('p'), KeyModifiers::NONE);
         assert_eq!(a.section_cursor, 0);
 
-        // space folds the section under the cursor.
-        let before = a.page.as_ref().unwrap().lines.len();
         press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        let after = a.page.as_ref().unwrap().lines.len();
-        assert!(after < before, "space should fold ({before} -> {after})");
-
-        // ...and again unfolds it.
+        assert_eq!(a.toggled(), [section(&a)]);
         press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        assert_eq!(a.page.as_ref().unwrap().lines.len(), before);
+        assert!(a.toggled().is_empty());
     }
 
     /// On the search screen `u` is literal text, not a command.

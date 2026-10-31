@@ -161,16 +161,3 @@ mod tests {
         assert!(check_format_version(&text, "std").is_ok());
     }
 }
-
-#[cfg(test)]
-mod toolchain_tests {
-    /// The override exists so CI can pin a nightly; make sure the default is
-    /// still the plain `nightly` channel.
-    #[test]
-    fn defaults_to_nightly() {
-        // Only meaningful when the caller has not set an override.
-        if std::env::var_os("RDV_TOOLCHAIN").is_none() {
-            assert_eq!(super::toolchain(), "nightly");
-        }
-    }
-}

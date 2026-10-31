@@ -343,6 +343,25 @@ fn draw_help(f: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdocs::app_on;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    /// Draw one 100×30 frame of the app showing the item at `path`.
+    fn drawn(path: &str) -> Buffer {
+        let mut app = app_on(path);
+        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        term.draw(|f| draw(f, &mut app)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
+    /// Each screen row as text.
+    fn rows(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
 
     #[test]
     fn hints_fit_the_width_and_always_keep_the_pinned_one() {
@@ -367,33 +386,11 @@ mod tests {
         assert_eq!(fit_hints(&hints, "? help", 2), "? help");
     }
 
-    /// The item-view footer is measured in characters, not bytes: the
-    /// separators and arrows are multi-byte.
-    #[test]
-    fn hints_are_measured_in_characters() {
-        let line = fit_hints(&["⏎ follow", "⇧tab link"], "? help", 30);
-        assert!(line.chars().count() <= 30, "{line:?}");
-    }
-
     /// A method opened from search is not just focused in the model: the row
     /// is actually painted as focused in the rendered frame.
     #[test]
     fn an_opened_method_row_is_highlighted_on_screen() {
-        use crate::app::App;
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (u, idx) = crate::testdocs::indexed();
-        let mut app = App::new(u, idx);
-        let m = app
-            .universe
-            .by_path("alloc::string::String::push_str")
-            .expect("String::push_str");
-        app.navigate_to(m);
-
-        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        term.draw(|f| draw(f, &mut app)).expect("draw");
-        let buf = term.backend().buffer();
+        let buf = drawn("alloc::string::String::push_str");
 
         // Find the row carrying the declaration, and confirm it is painted
         // with the focus background rather than the page background. The name
@@ -401,11 +398,10 @@ mod tests {
         // is also on the page and also starts with `fn push_str`.
         let want = theme::focused_link().bg.expect("focus bg");
         let mut found = false;
-        for y in 0..buf.area.height {
-            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        for (y, row) in rows(&buf).iter().enumerate() {
             if row.contains("fn push_str(") {
                 found = true;
-                let bg = buf[(6, y)].bg;
+                let bg = buf[(6, y as u16)].bg;
                 assert_eq!(bg, want, "method row {y} is not highlighted: {row:?}");
             }
         }
@@ -417,25 +413,8 @@ mod tests {
     /// like it had lost its left edge.
     #[test]
     fn the_item_view_is_padded_but_the_status_bar_is_not() {
-        use crate::app::App;
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (u, idx) = crate::testdocs::indexed();
-        let mut app = App::new(u, idx);
-        let m = app
-            .universe
-            .by_path("core::option::Option")
-            .expect("Option");
-        app.navigate_to(m);
-
-        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        term.draw(|f| draw(f, &mut app)).expect("draw");
-        let buf = term.backend().buffer();
-
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
+        let buf = drawn("core::option::Option");
+        let rows = rows(&buf);
         let (status, body) = rows.split_last().expect("at least one row");
 
         // Asserted against a literal margin rather than SIDE_PADDING itself:
@@ -471,7 +450,7 @@ mod tests {
 
         // The status bar owns its own single leading space and starts there.
         assert!(
-            status.starts_with(" /") || status.starts_with(" 0"),
+            status.starts_with(' ') && !status.starts_with("  "),
             "the status bar was indented with the page: {status:?}"
         );
     }

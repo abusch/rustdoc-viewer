@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn every_style_resolves_against_the_theme() {
         init();
-        let styles: [(&str, Style); 19] = [
+        let styles = [
             ("title", title()),
             ("section", section()),
             ("signature", signature()),
@@ -245,6 +245,9 @@ mod tests {
             ("inline_code", inline_code()),
             ("link", link()),
             ("quote", quote()),
+            ("code_block", code_block()),
+            ("page", page()),
+            ("member_docs", member_docs()),
             ("accent", accent()),
             ("focused_border", focused_border()),
             ("unfocused_border", unfocused_border()),
@@ -252,7 +255,9 @@ mod tests {
             ("selected_name", selected_name()),
             ("unselected_name", unselected_name()),
             ("selected_row", selected_row()),
+            ("focused_link", focused_link()),
             ("cursor_line", cursor_line()),
+            ("status_bar", status_bar()),
         ];
 
         for (name, style) in styles {

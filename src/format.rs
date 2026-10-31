@@ -582,11 +582,6 @@ mod tests {
 
     #[test]
     fn drops_empty_where_predicates() {
-        use rustdoc_types::{GenericParamDef, GenericParamDefKind};
-        let _ = (GenericParamDef {
-            name: "T".into(),
-            kind: GenericParamDefKind::Lifetime { outlives: vec![] },
-        },);
         // Rustdoc emits `T:` with no bounds for const-trait desugaring; that
         // must not surface as a dangling `where T:`.
         let g = Generics {

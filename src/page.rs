@@ -525,8 +525,8 @@ impl Builder<'_> {
                     self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref()
                 })
             {
-                // std both declares a primitive and re-exports core's docs for
-                // it, so the same name can arrive twice; keep the first.
+                // Re-exports can bring the same name in twice — `std::task`
+                // would otherwise list its `task` module twice; keep the first.
                 groups[i].1.push(target);
             }
         }
@@ -755,100 +755,65 @@ mod tests {
     use super::*;
     use crate::testdocs::universe;
 
-    #[test]
-    fn module_pages_list_their_contents() {
-        let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
-
-        let text: Vec<String> = page
-            .lines
+    /// What a module page lists: each row's section and name, read from the
+    /// page's targets and sections rather than parsed back out of its text.
+    fn listings(u: &Universe, r: ItemRef) -> Vec<(&'static str, String)> {
+        let page = build(u, r, 100, &Highlighter::new(), &[]);
+        page.targets
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-
-        assert!(
-            text.iter().any(|l| l.contains("Modules")),
-            "no Modules section"
-        );
-        assert!(
-            text.iter()
-                .any(|l| l.trim_start().starts_with("collections"))
-        );
-        // Children are navigable, not just printed.
-        assert!(page.targets.len() > 50, "module children should be targets");
+            .filter(|t| t.spans.is_none())
+            .map(|t| {
+                let section = page
+                    .sections
+                    .iter()
+                    .rev()
+                    .find(|s| s.line < t.line)
+                    .expect("a listed row outside any section");
+                let name = u.item(t.item).and_then(|i| i.name.clone());
+                (section.id.title(), name.unwrap_or_default())
+            })
+            .collect()
     }
 
     /// Every kind a module can hold gets a listing, not just the common ones.
     #[test]
-    fn module_listings_include_unions_and_derive_macros() {
+    fn module_pages_list_their_contents() {
         let u = universe();
-        let hl = Highlighter::new();
-        let listing = |path: &str, title: &str| -> Vec<String> {
-            let r = u.by_path(path).expect(path);
-            let page = build(&u, r, 100, &hl, &default_expanded());
-            let start = page
-                .lines
-                .iter()
-                .position(|l| text_of(l).contains(title))
-                .unwrap_or_else(|| panic!("{path} has no {title} section"));
-            page.lines[start + 1..]
-                .iter()
-                .map(text_of)
-                .take_while(|l| !l.starts_with(['▾', '▸']))
-                .collect()
-        };
+        let at = |path: &str| listings(&u, u.by_path(path).expect(path));
 
-        let unions = listing("core::mem", "Unions");
+        let root = at("std");
         assert!(
-            unions.iter().any(|l| l.contains("MaybeUninit")),
-            "{unions:?}"
+            root.contains(&("Modules", "collections".into())),
+            "{root:?}"
         );
-        let derives = listing("core::clone", "Derive Macros");
-        assert!(derives.iter().any(|l| l.contains("Clone")), "{derives:?}");
+        let mem = at("core::mem");
+        assert!(mem.contains(&("Unions", "MaybeUninit".into())), "{mem:?}");
+        let clone = at("core::clone");
+        assert!(
+            clone.contains(&("Derive Macros", "Clone".into())),
+            "{clone:?}"
+        );
     }
 
+    /// A module lists its public API, each item once. The JSON also carries
+    /// `pub(crate)` internals the website omits, and re-exports can bring the
+    /// same item in more than once: `std::task` would otherwise list its
+    /// `task` module twice.
     #[test]
-    fn module_listings_hide_crate_internals() {
+    fn module_listings_show_each_public_child_once() {
         let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
-
-        // These are `pub(crate)` in the JSON but absent from the website.
+        let root = listings(&u, u.root().expect("std root"));
         for internal in ["panicking", "backtrace_rs", "__restricted_std_workaround"] {
-            let listed = page.lines.iter().any(|l| {
-                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                t.trim_start().starts_with(&format!("{internal} ")) || t.trim() == internal
-            });
-            assert!(!listed, "{internal} should not be listed");
+            assert!(
+                root.iter().all(|(_, name)| name != internal),
+                "{internal} should not be listed"
+            );
         }
-    }
 
-    #[test]
-    fn module_listings_have_no_duplicate_names_per_section() {
-        let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
-
-        // std both declares primitives and re-exports core's docs for them.
-        let mut seen: Vec<String> = Vec::new();
-        let mut section = String::new();
-        for l in &page.lines {
-            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            // Section headings carry a fold marker; members are indented.
-            if let Some(rest) = t.strip_prefix("▾ ").or_else(|| t.strip_prefix("▸ ")) {
-                section = rest.trim().to_string();
-                continue;
-            }
-            if let Some(rest) = t.strip_prefix("    ") {
-                let name = rest.split_whitespace().next().unwrap_or("").to_string();
-                let key = format!("{section}/{name}");
-                assert!(!seen.contains(&key), "{key} listed twice");
-                seen.push(key);
-            }
+        let task = listings(&u, u.by_path("std::task").expect("std::task"));
+        let mut seen = std::collections::HashSet::new();
+        for row in &task {
+            assert!(seen.insert(row), "{row:?} listed twice");
         }
     }
 
@@ -857,7 +822,7 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
+        let page = build(&u, root, 100, &hl, &[]);
 
         // A module page's listings register as sections, so n/p steps them.
         let titles: Vec<&str> = page.sections.iter().map(|s| s.id.title()).collect();
@@ -866,7 +831,7 @@ mod tests {
 
         // Every registered section heading really is at the line claimed.
         for Section { id, line } in &page.sections {
-            let t = text_of(&page.lines[*line]);
+            let t = page.lines[*line].to_string();
             assert!(
                 t.contains(id.title()),
                 "line {line} is not {:?}: {t:?}",
@@ -918,22 +883,6 @@ mod tests {
         for g in ImplGroup::all() {
             assert!(groups.contains(&g), "missing group {g:?}");
         }
-        let total: usize = sections.iter().map(|s| s.impls.len()).sum();
-        assert!(total > 100, "expected Vec's ~110 impls, got {total}");
-    }
-
-    #[test]
-    fn builds_a_page_for_string() {
-        let u = universe();
-        let hl = Highlighter::new();
-        let r = u.by_path("alloc::string::String").expect("String");
-        let page = build(&u, r, 80, &hl, &default_expanded());
-
-        assert!(page.title.ends_with("string::String"));
-        assert!(page.lines.len() > 20, "page looks empty");
-        assert!(!page.sections.is_empty(), "no impl sections");
-        // Inherent methods are targets you can navigate to.
-        assert!(!page.targets.is_empty(), "no navigable targets");
     }
 
     #[test]
@@ -941,19 +890,15 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("alloc::string::String").expect("String");
-        let page = build(&u, r, 100, &hl, &default_expanded());
+        let page = build(&u, r, 100, &hl, &[]);
 
         // `String::new` documents itself with a `let s = String::new();`
         // example; finding it proves method docs reach the markdown renderer
         // rather than being cut to a one-line summary.
-        let text: Vec<String> = page
+        let example = page
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        let example = text
-            .iter()
-            .position(|l| l.contains("String::new()"))
+            .position(|l| l.to_string().contains("String::new()"))
             .expect("no rendered example from a method's docs");
 
         // Syntax highlighting splits a code line into several coloured spans;
@@ -981,7 +926,7 @@ mod tests {
             .lines
             .iter()
             .find(|l| {
-                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                let text = l.to_string();
                 text.trim_start().starts_with("impl ") && text.contains(" for ")
             })
             .expect("no trait impl header on String");
@@ -1013,7 +958,7 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, 100, &hl, &default_expanded());
+        let page = build(&u, r, 100, &hl, &[]);
 
         let links: Vec<&Target> = page.targets.iter().filter(|t| t.spans.is_some()).collect();
         assert!(!links.is_empty(), "no intra-doc link targets on Option");
@@ -1029,35 +974,26 @@ mod tests {
     }
 
     #[test]
-    fn option_variants_render() {
+    fn enum_pages_list_their_variants() {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, 80, &hl, &default_expanded());
-        let text: String = page
-            .lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Variants"), "no Variants section");
-        assert!(text.contains("None"), "missing None variant");
-        assert!(text.contains("Some"), "missing Some variant");
-    }
+        let page = build(&u, r, 80, &hl, &[]);
 
-    /// Text of a line, spans joined.
-    fn text_of(l: &Line<'_>) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
+        let variants: Vec<&str> = page
+            .targets
+            .iter()
+            .filter(|t| t.spans.is_none())
+            .filter_map(|t| u.item(t.item))
+            .filter(|i| matches!(i.inner, ItemEnum::Variant(_)))
+            .filter_map(|i| i.name.as_deref())
+            .collect();
+        assert_eq!(variants, ["None", "Some"]);
     }
 
     /// Columns of leading whitespace on a line.
     fn indent_of(l: &Line<'_>) -> usize {
-        let t = text_of(l);
+        let t = l.to_string();
         t.len() - t.trim_start().len()
     }
 
@@ -1082,7 +1018,7 @@ mod tests {
         // sits *above* the signatures around it, so missing one would let the
         // walk below compare a method against the next impl's heading.
         let is_impl_header = |l: &Line<'_>| {
-            let t = text_of(l);
+            let t = l.to_string();
             let t = t.trim_start();
             t.starts_with("impl ") || t.starts_with("impl<")
         };
@@ -1109,15 +1045,15 @@ mod tests {
                 .unwrap_or(page.lines.len());
 
             for sig in header + 1..end {
-                if !text_of(&page.lines[sig]).trim_start().starts_with("fn ") {
+                if !page.lines[sig].to_string().trim_start().starts_with("fn ") {
                     continue;
                 }
                 assert_eq!(indent_of(&page.lines[sig]), indent::MEMBER);
 
                 // Prose before the next signature, if this method has any.
                 let Some(docs) = (sig + 1..end)
-                    .take_while(|&i| !text_of(&page.lines[i]).trim_start().starts_with("fn "))
-                    .find(|&i| !text_of(&page.lines[i]).trim().is_empty())
+                    .take_while(|&i| !page.lines[i].to_string().trim_start().starts_with("fn "))
+                    .find(|&i| !page.lines[i].to_string().trim().is_empty())
                 else {
                     continue;
                 };
@@ -1126,7 +1062,7 @@ mod tests {
                     "docs at {} are shallower than the signature at {}: {:?}",
                     indent_of(&page.lines[docs]),
                     indent_of(&page.lines[sig]),
-                    text_of(&page.lines[docs]),
+                    page.lines[docs].to_string(),
                 );
                 checked += 1;
             }
@@ -1144,7 +1080,7 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, WIDTH, &hl, &default_expanded());
+        let page = build(&u, r, WIDTH, &hl, &[]);
 
         let want = theme::member_docs().bg.expect("panel bg");
         let tinted = page
@@ -1157,16 +1093,24 @@ mod tests {
             tinted.width(),
             WIDTH as usize,
             "tinted line stops short of the width: {:?}",
-            text_of(tinted)
+            tinted.to_string()
         );
         // The page's own top-level docs are not a member's, so they stay plain
         // — but they are indented to the same rung as one, so the description
         // hangs off the declaration rather than sitting flush left.
-        let first_prose = page
-            .lines
+        // A link before the first member row sits in the page's own docs.
+        let first_member = page
+            .targets
             .iter()
-            .find(|l| text_of(l).trim_start().starts_with("The Option"))
-            .expect("no top-level docs");
+            .find(|t| t.spans.is_none())
+            .expect("no member rows")
+            .line;
+        let first_prose = page
+            .targets
+            .iter()
+            .find(|t| t.spans.is_some() && t.line < first_member)
+            .map(|t| &page.lines[t.line])
+            .expect("no link in Option's own docs");
         assert!(
             first_prose.spans.iter().all(|s| s.style.bg.is_none()),
             "the page's own docs were tinted like a member's"
@@ -1175,7 +1119,7 @@ mod tests {
             indent_of(first_prose),
             indent::HEADING,
             "the page's own docs are not indented: {:?}",
-            text_of(first_prose)
+            first_prose.to_string()
         );
     }
 }

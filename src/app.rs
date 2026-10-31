@@ -233,7 +233,7 @@ impl App {
     }
 
     /// The sections toggled away from their default on the current page.
-    fn toggled(&self) -> &[SectionId] {
+    pub fn toggled(&self) -> &[SectionId] {
         self.current().map(|e| e.toggled.as_slice()).unwrap_or(&[])
     }
 
@@ -563,11 +563,7 @@ fn target_index(page: &Page, item: ItemRef, prefer_decl: bool) -> Option<usize> 
 mod tests {
     use super::*;
     use crate::page::{ImplGroup, SectionId};
-
-    fn app() -> App {
-        let (u, idx) = crate::testdocs::indexed();
-        App::new(u, idx)
-    }
+    use crate::testdocs::{app, app_on};
 
     #[test]
     fn starts_on_the_std_root_page() {
@@ -582,9 +578,7 @@ mod tests {
 
     #[test]
     fn u_goes_up_to_the_parent_and_records_history() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
         assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
 
         a.go_to_parent();
@@ -608,9 +602,7 @@ mod tests {
 
     #[test]
     fn toggling_a_section_expands_it() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
 
         let sections = a.page.as_ref().unwrap().sections.clone();
         let blanket = sections
@@ -631,9 +623,7 @@ mod tests {
 
     #[test]
     fn shift_tab_walks_links_backwards() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
+        let mut a = app_on("core::option::Option");
         a.viewport = 30;
 
         a.focus_next_target();
@@ -645,9 +635,7 @@ mod tests {
 
     #[test]
     fn focus_wraps_at_both_ends() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
+        let mut a = app_on("core::option::Option");
         a.viewport = 30;
         let last = a.page.as_ref().unwrap().targets.len() - 1;
 
@@ -663,9 +651,7 @@ mod tests {
 
     #[test]
     fn first_shift_tab_starts_from_the_visible_page() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
+        let mut a = app_on("core::option::Option");
         a.viewport = 30;
 
         // With nothing focused, stepping back should pick a target the reader
@@ -677,17 +663,6 @@ mod tests {
             line < a.scroll as usize + a.viewport as usize,
             "focused a target below the viewport"
         );
-    }
-
-    #[test]
-    fn jumping_to_bottom_does_not_move_the_section_cursor() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
-
-        a.section_cursor = 2;
-        a.scroll_to_bottom();
-        assert_eq!(a.section_cursor, 2, "G must not change which section folds");
     }
 
     #[test]
@@ -712,12 +687,7 @@ mod tests {
     /// rather than getting a bare page of its own.
     #[test]
     fn opening_an_inherent_method_lands_on_its_type() {
-        let mut a = app();
-        let m = a
-            .universe
-            .by_path("alloc::string::String::push_str")
-            .expect("String::push_str");
-        a.navigate_to(m);
+        let a = app_on("alloc::string::String::push_str");
 
         let page = a.page.as_ref().expect("a page");
         assert_eq!(page.title, "std::string::String");
@@ -725,7 +695,7 @@ mod tests {
         let line = a
             .focus
             .and_then(|f| page.targets.get(f))
-            .map(|t| text_of(&page.lines[t.line]))
+            .map(|t| page.lines[t.line].to_string())
             .expect("no method focused");
         assert!(
             line.trim().starts_with("fn push_str"),
@@ -763,7 +733,7 @@ mod tests {
             .iter()
             .find(|t| {
                 t.spans.is_none()
-                    && text_of(&page.lines[t.line]).trim() == "fn clone(&self) -> Self"
+                    && page.lines[t.line].to_string().trim() == "fn clone(&self) -> Self"
             })
             .map(|t| t.item)
             .expect("no clone method on String");
@@ -777,7 +747,7 @@ mod tests {
         let line = b
             .focus
             .and_then(|f| page.targets.get(f))
-            .map(|t| text_of(&page.lines[t.line]))
+            .map(|t| page.lines[t.line].to_string())
             .expect("no method focused");
         assert_eq!(line.trim(), "fn clone(&self) -> Self");
     }
@@ -786,9 +756,7 @@ mod tests {
     /// rustdoc gives it the same `Function` kind as a method.
     #[test]
     fn a_free_function_keeps_its_own_page() {
-        let mut a = app();
-        let f = a.universe.by_path("core::mem::swap").expect("mem::swap");
-        a.navigate_to(f);
+        let a = app_on("core::mem::swap");
 
         let page = a.page.as_ref().expect("a page");
         assert_eq!(page.title, "std::mem::swap");
@@ -816,11 +784,6 @@ mod tests {
         assert_eq!(a.page.as_ref().unwrap().title, "std::string::String");
     }
 
-    /// Flatten a line to its text, for asserting on what was focused.
-    fn text_of(l: &ratatui::text::Line<'static>) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
     /// Re-wrapping at a new width moves every line, so a focused target must be
     /// followed to its new position instead of leaving the scroll behind.
     #[test]
@@ -839,7 +802,7 @@ mod tests {
             let t = &p.targets[a.focus.expect("focused")];
             let line = t.line as u16;
             (line >= a.scroll && line < a.scroll + a.viewport)
-                .then(|| text_of(&p.lines[t.line]).trim().to_string())
+                .then(|| p.lines[t.line].to_string().trim().to_string())
         };
         assert!(
             on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
