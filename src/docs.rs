@@ -17,6 +17,8 @@ use rustdoc_types::{
     Attribute, Crate, Id, Item, ItemEnum, ItemKind, ItemSummary, Type, Visibility,
 };
 
+use crate::kind;
+
 /// Index of a crate within a [`Universe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CrateId(pub usize);
@@ -355,7 +357,7 @@ impl Universe {
         let candidates = self.by_path.get(path)?;
         candidates
             .iter()
-            .find(|r| self.kind_of(**r).is_some_and(is_container))
+            .find(|r| self.kind_of(**r).is_some_and(kind::is_container))
             .or_else(|| candidates.first())
             .copied()
     }
@@ -407,19 +409,6 @@ fn impl_self_id(t: &Type) -> Option<Id> {
         Type::BorrowedRef { type_, .. } => impl_self_id(type_),
         _ => None,
     }
-}
-
-/// Whether a kind can hold other items, and so can serve as a parent.
-fn is_container(kind: ItemKind) -> bool {
-    matches!(
-        kind,
-        ItemKind::Module
-            | ItemKind::Struct
-            | ItemKind::Enum
-            | ItemKind::Trait
-            | ItemKind::Union
-            | ItemKind::Primitive
-    )
 }
 
 /// Drop the last `::` segment, if there is one to drop.

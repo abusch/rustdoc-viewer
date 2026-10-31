@@ -4,6 +4,7 @@ mod app;
 mod docs;
 mod format;
 mod index;
+mod kind;
 mod load;
 mod page;
 mod render;

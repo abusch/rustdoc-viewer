@@ -8,6 +8,7 @@ use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind,
 
 use crate::docs::{ItemRef, Universe};
 use crate::format;
+use crate::kind;
 use crate::render::{self, Highlighter};
 use crate::theme;
 
@@ -142,17 +143,16 @@ mod indent {
 }
 
 /// Module children are listed in this order, matching the docs.rs layout.
-/// The first element is the kind name from [`inner_name`].
-const MODULE_KINDS: [(&str, &str); 9] = [
-    ("Module", "Modules"),
-    ("Macro", "Macros"),
-    ("Struct", "Structs"),
-    ("Enum", "Enums"),
-    ("Trait", "Traits"),
-    ("Function", "Functions"),
-    ("Type Alias", "Type Aliases"),
-    ("Constant", "Constants"),
-    ("Primitive", "Primitives"),
+const MODULE_KINDS: [(ItemKind, &str); 9] = [
+    (ItemKind::Module, "Modules"),
+    (ItemKind::Macro, "Macros"),
+    (ItemKind::Struct, "Structs"),
+    (ItemKind::Enum, "Enums"),
+    (ItemKind::Trait, "Traits"),
+    (ItemKind::Function, "Functions"),
+    (ItemKind::TypeAlias, "Type Aliases"),
+    (ItemKind::Constant, "Constants"),
+    (ItemKind::Primitive, "Primitives"),
 ];
 
 /// Collect and group the impls attached to an item.
@@ -262,7 +262,6 @@ pub fn build(
         };
     };
 
-    let kind = u.kind_of(r);
     let path = u
         .path_of(r)
         .unwrap_or_else(|| item.name.clone().unwrap_or_else(|| "?".into()));
@@ -271,10 +270,7 @@ pub fn build(
     // The kind and path identify the page rather than belonging to its body,
     // so they are handed to the item view as a fixed header line instead of
     // scrolling away with the first screenful.
-    let kind_label = kind
-        .as_ref()
-        .map(kind_name)
-        .unwrap_or_else(|| inner_name(&item.inner));
+    let kind_label = kind::label(item.inner.item_kind());
 
     if let Some(dep) = &item.deprecation {
         let mut s = String::from("Deprecated");
@@ -504,7 +500,7 @@ impl Builder<'_> {
             }
             let slot = MODULE_KINDS
                 .iter()
-                .position(|(k, _)| *k == inner_name(&resolved.inner));
+                .position(|(k, _)| *k == resolved.inner.item_kind());
             if let Some(i) = slot
                 && !groups[i].1.iter().any(|e| {
                     self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref()
@@ -674,35 +670,6 @@ fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
     lines
 }
 
-fn kind_name(k: &ItemKind) -> &'static str {
-    match k {
-        ItemKind::Module => "Module",
-        ItemKind::Struct => "Struct",
-        ItemKind::StructField => "Field",
-        ItemKind::Union => "Union",
-        ItemKind::Enum => "Enum",
-        ItemKind::Variant => "Variant",
-        ItemKind::Function => "Function",
-        ItemKind::Trait => "Trait",
-        ItemKind::TraitAlias => "Trait Alias",
-        ItemKind::Impl => "Impl",
-        ItemKind::TypeAlias => "Type Alias",
-        ItemKind::Constant => "Constant",
-        ItemKind::Static => "Static",
-        ItemKind::Macro => "Macro",
-        ItemKind::ProcAttribute => "Attribute Macro",
-        ItemKind::ProcDerive => "Derive Macro",
-        ItemKind::AssocConst => "Assoc Const",
-        ItemKind::AssocType => "Assoc Type",
-        ItemKind::Primitive => "Primitive",
-        ItemKind::Keyword => "Keyword",
-        ItemKind::ExternCrate => "Extern Crate",
-        ItemKind::Use => "Use",
-        ItemKind::ExternType => "Extern Type",
-        ItemKind::Attribute => "Attribute",
-    }
-}
-
 /// Whether an item belongs in a module listing.
 ///
 /// The JSON carries crate-internal items (`std::sys`, `std::panicking`)
@@ -761,28 +728,6 @@ fn strip_link_brackets(s: &str) -> String {
         }
     }
     out
-}
-
-fn inner_name(inner: &ItemEnum) -> &'static str {
-    match inner {
-        ItemEnum::Module(_) => "Module",
-        ItemEnum::Struct(_) => "Struct",
-        ItemEnum::Union(_) => "Union",
-        ItemEnum::Enum(_) => "Enum",
-        ItemEnum::Function(_) => "Function",
-        ItemEnum::Trait(_) => "Trait",
-        ItemEnum::Impl(_) => "Impl",
-        ItemEnum::TypeAlias(_) => "Type Alias",
-        ItemEnum::Constant { .. } => "Constant",
-        ItemEnum::Static(_) => "Static",
-        ItemEnum::Macro(_) => "Macro",
-        ItemEnum::Primitive(_) => "Primitive",
-        ItemEnum::Variant(_) => "Variant",
-        ItemEnum::StructField(_) => "Field",
-        ItemEnum::AssocConst { .. } => "Assoc Const",
-        ItemEnum::AssocType { .. } => "Assoc Type",
-        _ => "Item",
-    }
 }
 
 /// The sections a fresh page has been explicitly toggled open or shut.

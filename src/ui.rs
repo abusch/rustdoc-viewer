@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, Screen};
 use crate::index::Entry;
+use crate::kind;
 use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -84,7 +85,7 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         ("  ", theme::unselected_name())
     };
 
-    let kind = kind_badge(&e.kind);
+    let kind = kind::badge(e.kind);
     // Show the module path dimmed, with the name itself highlighted.
     let (parent, name) = match e.path.rsplit_once("::") {
         Some((p, n)) => (format!("{p}::"), n.to_string()),
@@ -106,28 +107,6 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         return Line::from(spans).style(theme::selected_row());
     }
     Line::from(spans)
-}
-
-fn kind_badge(k: &rustdoc_types::ItemKind) -> &'static str {
-    use rustdoc_types::ItemKind as K;
-    match k {
-        K::Struct => "struct",
-        K::Enum => "enum",
-        K::Trait => "trait",
-        K::Function => "fn",
-        K::Module => "mod",
-        K::Macro => "macro",
-        K::TypeAlias => "type",
-        K::Constant => "const",
-        K::Static => "static",
-        K::Primitive => "prim",
-        K::Union => "union",
-        K::Variant => "variant",
-        K::AssocConst => "const",
-        K::AssocType => "type",
-        K::StructField => "field",
-        _ => "item",
-    }
 }
 
 /// Rows the item view spends on its header before the body starts.

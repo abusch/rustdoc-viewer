@@ -2,6 +2,7 @@
 
 use crate::docs::{ItemRef, Universe};
 use crate::index::SearchIndex;
+use crate::kind;
 use crate::page::{self, Page, SectionId, Target};
 use crate::render::Highlighter;
 
@@ -174,11 +175,7 @@ impl App {
             Some(K::Function | K::AssocConst | K::AssocType | K::StructField) => {
                 let owner = self.universe.parent_of(item)?;
                 // A module parent means a free function, which keeps its page.
-                matches!(
-                    self.universe.kind_of(owner)?,
-                    K::Struct | K::Enum | K::Union | K::Trait | K::Primitive
-                )
-                .then_some(owner)?
+                kind::has_members(self.universe.kind_of(owner)?).then_some(owner)?
             }
             // Not in `paths` at all: only an impl can account for it.
             None => self.universe.owner_of(item)?,

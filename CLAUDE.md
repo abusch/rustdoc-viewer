@@ -82,6 +82,8 @@ Data flows in one direction: `load` → `docs` → `index` → `page` → `ui`.
   and owns all cross-crate identity. Items are addressed by `ItemRef`
   (crate + id), never by bare `Id`, because ids are only meaningful within their
   crate; `resolve` translates a foreign id through its canonical path.
+- **`kind.rs`** names each `ItemKind` (page label, search badge) and says what
+  it can hold; add a kind's spelling there rather than matching on it locally.
 - **`index.rs`** — `SearchIndex` is the flat fuzzy-searchable view (frizbee).
 - **`page.rs`** builds a `Page`: styled lines plus `Target`s and foldable sections.
 - **`render.rs`** turns rustdoc markdown into styled lines and syntax-highlights
