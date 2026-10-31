@@ -50,13 +50,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                app.status = None;
-                handle_key(app, key);
-            }
-            Event::Resize(_, _) => {}
-            _ => {}
+        // Anything else, a resize included, only needs the redraw at the top
+        // of the loop.
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            handle_key(app, key);
         }
         if app.should_quit {
             return Ok(());
@@ -65,6 +64,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // A status message answers the previous key; the next one dismisses it.
+    app.status = None;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // Help swallows every key except the ones that dismiss it.
@@ -155,7 +156,6 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         (KeyCode::Char('n'), false) => app.next_section(),
         (KeyCode::Char('p'), false) => app.prev_section(),
         (KeyCode::Char(' '), _) => app.toggle_section(),
-        (KeyCode::Char('?'), _) => app.show_help(),
         _ => {}
     }
 }
@@ -166,7 +166,6 @@ mod tests {
     use crate::testdocs::{app, app_on};
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-        app.status = None;
         handle_key(app, KeyEvent::new(code, modifiers));
     }
 
