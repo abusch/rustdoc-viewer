@@ -144,19 +144,66 @@ fn plain(code: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Whether a fenced block is Rust, judging by its info string.
+/// Whether a fenced block is Rust, judging by its info string the way
+/// rustdoc's `LangString::parse` does.
 ///
-/// Rustdoc fences carry attributes rather than a language — ```` ```ignore
-/// (needs windows) ````, ```` ```no_run ````, ```` ```should_panic ```` — and
-/// rustdoc treats any block not naming another language as Rust. So only a
-/// known other language rules it out.
+/// A block is Rust unless it carries a word rustdoc does not know (`text`,
+/// `toml`, a typo) — any such word is taken to name another language — or the
+/// `custom` tag. A doctest attribute (`no_run`, `ignore`, ...) or `rust` itself
+/// keeps it Rust despite an unknown word, though the first few only count when
+/// they come before it. `edition20xx` is neutral, as are `(comments)` and
+/// `{attribute blocks}`.
 fn is_rust(info: &str) -> bool {
-    const OTHER_LANGUAGES: [&str; 13] = [
-        "text", "txt", "toml", "json", "sh", "bash", "shell", "console", "c", "cpp", "c++",
-        "python", "py",
-    ];
-    let first = info.trim().split([',', ' ']).next().unwrap_or("").trim();
-    !OTHER_LANGUAGES.contains(&first)
+    let mut seen_rust = false;
+    let mut seen_other = false;
+    for token in fence_tokens(info) {
+        match token {
+            "rust" => seen_rust = true,
+            "custom" => return false,
+            "should_panic" | "no_run" | "ignore" => seen_rust = !seen_other,
+            t if t.starts_with("ignore-") => seen_rust = !seen_other,
+            "test_harness" | "compile_fail" | "standalone_crate" => {
+                seen_rust = !seen_other || seen_rust;
+            }
+            t if t.starts_with("edition") => {}
+            _ => seen_other = true,
+        }
+    }
+    !seen_other || seen_rust
+}
+
+/// The words of a fence's info string, with `(comments)` and `{attribute
+/// blocks}` dropped, as rustdoc's tag iterator reads them.
+fn fence_tokens(info: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut skip_until = None;
+    for (i, c) in info.char_indices() {
+        if let Some(close) = skip_until {
+            if c == close {
+                skip_until = None;
+            }
+            continue;
+        }
+        match c {
+            ' ' | ',' | '\t' | '(' | '{' => {
+                if let Some(s) = start.take() {
+                    tokens.push(&info[s..i]);
+                }
+                skip_until = match c {
+                    '(' => Some(')'),
+                    '{' => Some('}'),
+                    _ => None,
+                };
+            }
+            _ if start.is_none() => start = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&info[s..]);
+    }
+    tokens
 }
 
 /// Drop rustdoc's hidden lines (`# ...`), matching what the website shows.
@@ -245,9 +292,10 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(code) = in_code.take() {
-                    let code = strip_hidden(&code);
+                    // Hidden lines are a doctest feature; in a shell or TOML
+                    // example a leading `#` is a comment the reader should see.
                     let lines = if code_is_rust {
-                        hl.highlight(&code)
+                        hl.highlight(&strip_hidden(&code))
                     } else {
                         plain(&code)
                     };
@@ -533,23 +581,64 @@ pub fn item_docs(item: &Item, width: u16, hl: &Highlighter) -> Rendered {
 mod tests {
     use super::*;
 
-    /// Rustdoc's fence attributes and unknown annotations still mean Rust;
-    /// only a named other language does not.
+    /// The cases rustdoc's `LangString::parse` distinguishes: doctest
+    /// attributes keep a block Rust, any unknown word makes it another
+    /// language unless a Rust tag outweighs it, and order matters for the
+    /// attributes that only count before an unknown word.
     #[test]
-    fn fences_are_rust_unless_they_name_another_language() {
+    fn fences_are_rust_the_way_rustdoc_decides() {
         for info in [
             "",
             "rust",
             "ignore (needs windows)",
             "no_run",
             "compile_fail,edition2021",
-            "weird_attr",
+            "ignore-wasm32",
+            "ignore,text",
+            "text,rust",
+            "rust {.example}",
         ] {
             assert!(is_rust(info), "{info:?} should be Rust");
         }
-        for info in ["text", "toml", "sh", "console"] {
+        for info in [
+            "text",
+            "toml",
+            "console",
+            "weird_attr",
+            "text,ignore",
+            "rust2021",
+            "custom",
+        ] {
             assert!(!is_rust(info), "{info:?} should not be Rust");
         }
+    }
+
+    #[test]
+    fn fence_tokens_drop_comments_and_attribute_blocks() {
+        assert_eq!(fence_tokens("ignore (needs windows)"), ["ignore"]);
+        assert_eq!(
+            fence_tokens("rust,no_run {.class} edition2021"),
+            ["rust", "no_run", "edition2021"]
+        );
+        assert_eq!(fence_tokens(" , "), Vec::<&str>::new());
+    }
+
+    /// A `#` line is hidden only in Rust, where it is a doctest feature; in
+    /// another language it is a comment and stays.
+    #[test]
+    fn hidden_lines_are_only_stripped_from_rust() {
+        let hl = Highlighter::new();
+        let render = |md: &str| -> Vec<String> {
+            markdown(md, &HashMap::new(), 60, &hl)
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let rust = render("```\n# use std::fmt;\nlet x = 1;\n```\n");
+        assert!(!rust.iter().any(|l| l.contains("use std::fmt")), "{rust:?}");
+        let sh = render("```sh\n# install it\ncargo add x\n```\n");
+        assert!(sh.iter().any(|l| l.contains("# install it")), "{sh:?}");
     }
 
     #[test]
