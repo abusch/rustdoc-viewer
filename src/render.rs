@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use arborium_theme::{HIGHLIGHTS, Theme, builtin};
+use arborium_theme::{HIGHLIGHTS, Theme};
 use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -47,34 +47,26 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(arborium::Highlighter::new()),
-            // theme: builtin::catppuccin_mocha(),
-            theme: builtin::catppuccin_latte(),
+            theme: theme::syntax(),
         }
     }
 
-    /// Highlight a block of code, returning one styled line per source line.
+    /// Highlight Rust code, returning one styled line per source line.
     ///
-    /// Only Rust is highlighted; anything else renders as plain text, as does
-    /// code the grammar cannot parse.
-    fn highlight(&self, code: &str, lang: &str) -> Vec<Line<'static>> {
+    /// Rust is the only grammar built in. Code it cannot parse falls back to
+    /// [`plain`].
+    fn highlight(&self, code: &str) -> Vec<Line<'static>> {
         // Arborium trims trailing newlines itself, so span offsets are relative
         // to the trimmed source. Trim up front to keep our slicing in step.
         let code = code.trim_end_matches('\n');
-        let plain = || code.lines().map(|l| Line::from(l.to_string())).collect();
-
-        // `code_language` speaks rustdoc's fence tokens; arborium wants grammar
-        // names, and Rust is the only grammar we build in.
-        if lang != "rs" {
-            return plain();
-        }
         let Ok(spans) = self.inner.borrow_mut().highlight_spans("rust", code) else {
-            return plain();
+            return plain(code);
         };
         // Raw spans overlap and are unordered; flattening resolves them into a
         // sorted, disjoint token stream, innermost match winning.
         let tokens = arborium_highlight::spans_to_flat_tokens(code, spans);
         if tokens.is_empty() {
-            return plain();
+            return plain(code);
         }
 
         let mut lines: Vec<Line<'static>> = vec![Line::default()];
@@ -144,42 +136,74 @@ impl Default for Highlighter {
     }
 }
 
-/// Strip rustdoc's fence annotations and pick a highlighting language.
-///
-/// Rustdoc fences carry attributes rather than a language — ```` ```ignore
-/// (needs windows) ````, ```` ```no_run ````, ```` ```should_panic ````. Any
-/// token that is not a known language means "this is still Rust", which is
-/// rustdoc's own default for an unannotated block.
-pub fn code_language(info: &str) -> &'static str {
-    const ATTRS: [&str; 10] = [
-        "ignore",
-        "no_run",
-        "should_panic",
-        "compile_fail",
-        "edition2015",
-        "edition2018",
-        "edition2021",
-        "edition2024",
-        "test_harness",
-        "standalone_crate",
-    ];
+/// Code as unstyled lines, for anything that is not Rust.
+fn plain(code: &str) -> Vec<Line<'static>> {
+    code.trim_end_matches('\n')
+        .lines()
+        .map(|l| Line::from(l.to_string()))
+        .collect()
+}
 
-    let first = info.trim().split([',', ' ']).next().unwrap_or("").trim();
-    if first.is_empty() || ATTRS.contains(&first) || first.starts_with("edition") {
-        return "rs";
+/// Whether a fenced block is Rust, judging by its info string the way
+/// rustdoc's `LangString::parse` does.
+///
+/// A block is Rust unless it carries a word rustdoc does not know (`text`,
+/// `toml`, a typo) — any such word is taken to name another language — or the
+/// `custom` tag. A doctest attribute (`no_run`, `ignore`, ...) or `rust` itself
+/// keeps it Rust despite an unknown word, though the first few only count when
+/// they come before it. `edition20xx` is neutral, as are `(comments)` and
+/// `{attribute blocks}`.
+fn is_rust(info: &str) -> bool {
+    let mut seen_rust = false;
+    let mut seen_other = false;
+    for token in fence_tokens(info) {
+        match token {
+            "rust" => seen_rust = true,
+            "custom" => return false,
+            "should_panic" | "no_run" | "ignore" => seen_rust = !seen_other,
+            t if t.starts_with("ignore-") => seen_rust = !seen_other,
+            "test_harness" | "compile_fail" | "standalone_crate" => {
+                seen_rust = !seen_other || seen_rust;
+            }
+            t if t.starts_with("edition") => {}
+            _ => seen_other = true,
+        }
     }
-    match first {
-        "rust" | "rs" => "rs",
-        "text" | "txt" => "txt",
-        "toml" => "toml",
-        "json" => "json",
-        "sh" | "bash" | "shell" | "console" => "sh",
-        "c" => "c",
-        "cpp" | "c++" => "cpp",
-        "python" | "py" => "py",
-        // Unknown annotation: rustdoc still treats the block as Rust.
-        _ => "rs",
+    !seen_other || seen_rust
+}
+
+/// The words of a fence's info string, with `(comments)` and `{attribute
+/// blocks}` dropped, as rustdoc's tag iterator reads them.
+fn fence_tokens(info: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut skip_until = None;
+    for (i, c) in info.char_indices() {
+        if let Some(close) = skip_until {
+            if c == close {
+                skip_until = None;
+            }
+            continue;
+        }
+        match c {
+            ' ' | ',' | '\t' | '(' | '{' => {
+                if let Some(s) = start.take() {
+                    tokens.push(&info[s..i]);
+                }
+                skip_until = match c {
+                    '(' => Some(')'),
+                    '{' => Some('}'),
+                    _ => None,
+                };
+            }
+            _ if start.is_none() => start = Some(i),
+            _ => {}
+        }
     }
+    if let Some(s) = start {
+        tokens.push(&info[s..]);
+    }
+    tokens
 }
 
 /// Drop rustdoc's hidden lines (`# ...`), matching what the website shows.
@@ -202,25 +226,12 @@ fn strip_hidden(code: &str) -> String {
     out
 }
 
-/// Marks a span as belonging to link number `n`.
+/// Inline text waiting to be wrapped: each span with the link it belongs to.
 ///
-/// Link extents cannot be recorded when the link is emitted: at that point the
-/// text is still an unwrapped run of spans, and `wrap_into` decides only later
-/// which line each piece lands on. So links are tagged here and their extents
-/// recovered from the wrapped lines afterwards. `underline_color` is unused by
-/// this renderer, carries through wrapping untouched, and is cleared once the
-/// tag has been read back.
-fn tag(style: Style, n: usize) -> Style {
-    style.underline_color(Color::Indexed(u8::try_from(n % 255).unwrap_or(0) + 1))
-}
-
-/// Read back the link number a span was tagged with, if any.
-fn tag_of(style: Style) -> Option<usize> {
-    match style.underline_color {
-        Some(Color::Indexed(n)) if n > 0 => Some(usize::from(n - 1)),
-        _ => None,
-    }
-}
+/// A link's extent cannot be recorded when the link is emitted, because only
+/// wrapping decides which line each piece lands on. Carrying the link beside
+/// the span lets [`flush`] record the extent as it lays the lines out.
+type Run = Vec<(Span<'static>, Option<Id>)>;
 
 /// Render an item's markdown docs to styled, width-wrapped lines.
 pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highlighter) -> Rendered {
@@ -228,15 +239,13 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
     let mut out = Rendered::default();
 
     // State accumulated across events for the current paragraph.
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run: Run = Vec::new();
     let mut style = Style::default();
     let mut list_depth: usize = 0;
     let mut in_code: Option<String> = None;
-    let mut code_lang = "rs";
+    let mut code_is_rust = true;
     let mut quote_depth = 0usize;
     let mut pending_link: Option<String> = None;
-    // Links tagged in the current unflushed run, indexed by tag number.
-    let mut pending_ids: Vec<Id> = Vec::new();
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -252,60 +261,52 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
         Some((raw.into(), pulldown_cmark::CowStr::Borrowed("")))
     };
 
-    // Flush the current inline run as wrapped lines with the given indent,
-    // then recover the extent of every link tagged within it.
-    macro_rules! flush {
-        ($indent:expr) => {{
-            if !spans.is_empty() {
-                let indent: String = $indent;
-                let from = out.lines.len();
-                wrap_into(&mut out.lines, std::mem::take(&mut spans), width, &indent);
-                collect_links(&mut out, from, &pending_ids);
-            }
-            pending_ids.clear();
-        }};
-    }
-
     let parser = Parser::new_with_broken_link_callback(docs, opts, Some(&mut callback));
     for event in parser {
         match event {
             Event::Start(Tag::Heading { .. }) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 if !out.lines.is_empty() {
                     out.lines.push(Line::default());
                 }
                 style = theme::heading();
             }
             Event::End(TagEnd::Heading(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 style = Style::default();
                 out.lines.push(Line::default());
             }
             Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
                 let indent = "  ".repeat(list_depth) + &"> ".repeat(quote_depth);
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
                 out.lines.push(Line::default());
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush!(String::new());
-                code_lang = match &kind {
-                    CodeBlockKind::Fenced(info) => code_language(info),
-                    CodeBlockKind::Indented => "rs",
+                flush(&mut out, &mut run, width, "");
+                code_is_rust = match &kind {
+                    CodeBlockKind::Fenced(info) => is_rust(info),
+                    CodeBlockKind::Indented => true,
                 };
                 in_code = Some(String::new());
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(code) = in_code.take() {
-                    let code = strip_hidden(&code);
-                    for line in hl.highlight(&code, code_lang) {
+                    // Hidden lines are a doctest feature; in a shell or TOML
+                    // example a leading `#` is a comment the reader should see.
+                    let lines = if code_is_rust {
+                        hl.highlight(&strip_hidden(&code))
+                    } else {
+                        plain(&code)
+                    };
+                    for line in lines {
                         out.lines.push(code_line(line, width));
                     }
                     out.lines.push(Line::default());
                 }
             }
             Event::Start(Tag::List(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 list_depth += 1;
             }
             Event::End(TagEnd::List(_)) => {
@@ -315,14 +316,14 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                 }
             }
             Event::Start(Tag::Item) => {
-                spans.push(Span::raw("• "));
+                run.push((Span::raw("• "), None));
             }
             Event::End(TagEnd::Item) => {
                 let indent = "  ".repeat(list_depth.saturating_sub(1));
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 quote_depth += 1;
                 style = theme::quote();
             }
@@ -346,42 +347,36 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             }
             Event::Code(text) => {
                 // Inline code may itself be an intra-doc link target.
-                let key = text.to_string();
-                let mut st = theme::inline_code();
-                if let Some(id) = lookup(links, &key, pending_link.as_deref()) {
-                    st = tag(theme::link(), pending_ids.len());
-                    pending_ids.push(id);
-                }
-                spans.push(Span::styled(key, st));
+                let link = lookup(links, &text, pending_link.as_deref());
+                let st = if link.is_some() {
+                    theme::link()
+                } else {
+                    theme::inline_code()
+                };
+                run.push((Span::styled(text.to_string(), st), link));
             }
             Event::Text(text) => {
                 if let Some(code) = in_code.as_mut() {
                     code.push_str(&text);
                 } else {
-                    let mut st = style;
-                    if let Some(id) = lookup(links, &text, pending_link.as_deref()) {
-                        st = tag(style, pending_ids.len());
-                        pending_ids.push(id);
-                    }
-                    spans.push(Span::styled(text.to_string(), st));
+                    let link = lookup(links, &text, pending_link.as_deref());
+                    run.push((Span::styled(text.to_string(), style), link));
                 }
             }
-            Event::SoftBreak => spans.push(Span::raw(" ")),
+            Event::SoftBreak => run.push((Span::raw(" "), None)),
             Event::HardBreak => {
                 let indent = "  ".repeat(list_depth);
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
             }
             Event::Rule => {
-                flush!(String::new());
-                out.lines.push(Line::styled(
-                    "─".repeat(width.min(60)),
-                    Style::new().fg(Color::DarkGray),
-                ));
+                flush(&mut out, &mut run, width, "");
+                out.lines
+                    .push(Line::styled("─".repeat(width.min(60)), theme::rule()));
             }
             _ => {}
         }
     }
-    flush!(String::new());
+    flush(&mut out, &mut run, width, "");
 
     // Trailing blank lines add nothing but scrolling.
     while out.lines.last().is_some_and(|l| l.width() == 0) {
@@ -421,41 +416,6 @@ fn collapse_blank_runs(out: &mut Rendered) {
     out.lines = kept;
 }
 
-/// Recover link extents from lines `from..` and clear the tags.
-///
-/// Wrapping may split a tagged run across lines; each line the tag appears on
-/// becomes its own `LinkTarget`, so the highlight follows the text exactly.
-fn collect_links(out: &mut Rendered, from: usize, ids: &[Id]) {
-    for line in from..out.lines.len() {
-        // Run of consecutive spans sharing one tag: (tag, start index).
-        let mut run: Option<(usize, usize)> = None;
-        let len = out.lines[line].spans.len();
-        for i in 0..=len {
-            let here = (i < len)
-                .then(|| tag_of(out.lines[line].spans[i].style))
-                .flatten();
-            match (run, here) {
-                (Some((n, _)), Some(m)) if n == m => continue,
-                (Some((n, start)), _) => {
-                    if let Some(id) = ids.get(n) {
-                        out.links.push(LinkTarget {
-                            line,
-                            spans: start..i,
-                            id: *id,
-                        });
-                    }
-                    run = here.map(|m| (m, i));
-                }
-                (None, Some(m)) => run = Some((m, i)),
-                (None, None) => {}
-            }
-        }
-        for span in &mut out.lines[line].spans {
-            span.style.underline_color = None;
-        }
-    }
-}
-
 /// Resolve a link by its display text or its destination.
 ///
 /// Rustdoc keys `Item.links` by the link text as written, which may or may not
@@ -472,17 +432,21 @@ fn lookup(links: &HashMap<String, Id>, text: &str, dest: Option<&str>) -> Option
         .copied()
 }
 
-/// Word-wrap a run of spans to `width`, preserving each span's style.
-fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usize, indent: &str) {
+/// Word-wrap the pending run to `width` beneath `indent`, emptying it.
+///
+/// Each span keeps its style, and every link records the spans it landed on.
+/// Wrapping can split one link across lines, which yields one target per line
+/// so the highlight follows the text exactly.
+fn flush(out: &mut Rendered, run: &mut Run, width: usize, indent: &str) {
     let avail = width.saturating_sub(indent.len()).max(8);
-    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current: Run = Vec::new();
     let mut used = 0usize;
 
     // Continuation lines line up under the first, past any bullet.
     let cont: String = " ".repeat(indent.len());
     let mut first = true;
 
-    for span in spans {
+    for (span, link) in run.drain(..) {
         let style = span.style;
         for word in split_keeping_spaces(&span.content) {
             let w = word.chars().count();
@@ -491,10 +455,7 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
                 continue;
             }
             if used + w > avail && used > 0 {
-                out.push(prefixed(
-                    if first { indent } else { &cont },
-                    std::mem::take(&mut current),
-                ));
+                push_wrapped(out, if first { indent } else { &cont }, &mut current);
                 first = false;
                 used = 0;
                 if word.trim().is_empty() {
@@ -502,12 +463,39 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
                 }
             }
             used += w;
-            current.push(Span::styled(word, style));
+            current.push((Span::styled(word, style), link));
         }
     }
     if !current.is_empty() {
-        out.push(prefixed(if first { indent } else { &cont }, current));
+        push_wrapped(out, if first { indent } else { &cont }, &mut current);
     }
+}
+
+/// Emit one wrapped line, recording a target for each link on it.
+///
+/// Consecutive spans naming the same item are one link: a link's text is
+/// split into words for wrapping, and they must light up together.
+fn push_wrapped(out: &mut Rendered, indent: &str, current: &mut Run) {
+    let line = out.lines.len();
+    let mut spans = Vec::with_capacity(current.len() + 1);
+    if !indent.is_empty() {
+        spans.push(Span::raw(indent.to_string()));
+    }
+    for (span, link) in current.drain(..) {
+        let i = spans.len();
+        if let Some(id) = link {
+            match out.links.last_mut() {
+                Some(t) if t.line == line && t.id == id && t.spans.end == i => t.spans.end += 1,
+                _ => out.links.push(LinkTarget {
+                    line,
+                    spans: i..i + 1,
+                    id,
+                }),
+            }
+        }
+        spans.push(span);
+    }
+    out.lines.push(Line::from(spans));
 }
 
 /// Dress one line of a fenced code block: a gutter rule, then the code, then
@@ -524,38 +512,31 @@ fn code_line(line: Line<'static>, width: usize) -> Line<'static> {
         Span::styled("┃", theme::dim().patch(bg)),
         Span::styled(" ", bg),
     ];
-    let mut used = CODE_GUTTER;
-    for span in line.spans {
-        used += span.content.chars().count();
-        let style = span.style.patch(bg);
-        spans.push(span.style(style));
-    }
+    spans.extend(line.spans.into_iter().map(|s| {
+        let style = s.style.patch(bg);
+        s.style(style)
+    }));
     // Stop the slab at a comfortable reading measure rather than running it to
     // the window edge: rustdoc examples are written to roughly this width, so
     // past it the background is empty anyway and only makes the block louder.
     // A line longer than the cap keeps its own length — cutting the background
     // mid-code would look like damage.
-    let pad_to = width.min(CODE_BLOCK_WIDTH);
-    if used < pad_to {
-        spans.push(Span::styled(" ".repeat(pad_to - used), bg));
-    }
-    Line::from(spans)
+    pad_to(Line::from(spans), width.min(CODE_BLOCK_WIDTH), bg)
 }
 
-/// Columns [`code_line`] spends on the gutter before the code itself.
-const CODE_GUTTER: usize = 2;
+/// Pad a line with spaces in `style` out to `width` columns, so a background
+/// reads as one block rather than stopping at the text's ragged end. A line
+/// already that wide is left alone.
+pub fn pad_to(mut line: Line<'static>, width: usize, style: Style) -> Line<'static> {
+    let used = line.width();
+    if used < width {
+        line.push_span(Span::styled(" ".repeat(width - used), style));
+    }
+    line
+}
 
 /// Widest a code block's background is painted, gutter included.
 const CODE_BLOCK_WIDTH: usize = 100;
-
-fn prefixed(indent: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
-    if indent.is_empty() {
-        return Line::from(spans);
-    }
-    let mut v = vec![Span::raw(indent.to_string())];
-    v.append(&mut spans);
-    Line::from(v)
-}
 
 /// Split text into words, keeping the whitespace as its own chunks.
 fn split_keeping_spaces(s: &str) -> Vec<String> {
@@ -580,9 +561,12 @@ fn split_keeping_spaces(s: &str) -> Vec<String> {
 /// inside prose gets.
 ///
 /// A signature is a heading, not an example: it carries no gutter, no
-/// background, and no indent of its own, so its caller decides where it sits.
+/// background, no indent of its own, and no blank lines, so it sits as one
+/// compact block wherever its caller puts it.
 pub fn declaration(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
-    hl.highlight(code, "rs")
+    let mut lines = hl.highlight(code);
+    lines.retain(|l| l.width() > 0);
+    lines
 }
 
 /// Convenience: render an item's own docs.
@@ -597,18 +581,64 @@ pub fn item_docs(item: &Item, width: u16, hl: &Highlighter) -> Rendered {
 mod tests {
     use super::*;
 
+    /// The cases rustdoc's `LangString::parse` distinguishes: doctest
+    /// attributes keep a block Rust, any unknown word makes it another
+    /// language unless a Rust tag outweighs it, and order matters for the
+    /// attributes that only count before an unknown word.
     #[test]
-    fn strips_rustdoc_fence_attributes() {
-        assert_eq!(code_language(""), "rs");
-        assert_eq!(code_language("ignore (needs windows)"), "rs");
-        assert_eq!(code_language("no_run"), "rs");
-        assert_eq!(code_language("should_panic"), "rs");
-        assert_eq!(code_language("compile_fail,edition2021"), "rs");
-        assert_eq!(code_language("edition2024"), "rs");
-        assert_eq!(code_language("text"), "txt");
-        assert_eq!(code_language("toml"), "toml");
-        // An unknown annotation still means Rust, per rustdoc's default.
-        assert_eq!(code_language("weird_attr"), "rs");
+    fn fences_are_rust_the_way_rustdoc_decides() {
+        for info in [
+            "",
+            "rust",
+            "ignore (needs windows)",
+            "no_run",
+            "compile_fail,edition2021",
+            "ignore-wasm32",
+            "ignore,text",
+            "text,rust",
+            "rust {.example}",
+        ] {
+            assert!(is_rust(info), "{info:?} should be Rust");
+        }
+        for info in [
+            "text",
+            "toml",
+            "console",
+            "weird_attr",
+            "text,ignore",
+            "rust2021",
+            "custom",
+        ] {
+            assert!(!is_rust(info), "{info:?} should not be Rust");
+        }
+    }
+
+    #[test]
+    fn fence_tokens_drop_comments_and_attribute_blocks() {
+        assert_eq!(fence_tokens("ignore (needs windows)"), ["ignore"]);
+        assert_eq!(
+            fence_tokens("rust,no_run {.class} edition2021"),
+            ["rust", "no_run", "edition2021"]
+        );
+        assert_eq!(fence_tokens(" , "), Vec::<&str>::new());
+    }
+
+    /// A `#` line is hidden only in Rust, where it is a doctest feature; in
+    /// another language it is a comment and stays.
+    #[test]
+    fn hidden_lines_are_only_stripped_from_rust() {
+        let hl = Highlighter::new();
+        let render = |md: &str| -> Vec<String> {
+            markdown(md, &HashMap::new(), 60, &hl)
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let rust = render("```\n# use std::fmt;\nlet x = 1;\n```\n");
+        assert!(!rust.iter().any(|l| l.contains("use std::fmt")), "{rust:?}");
+        let sh = render("```sh\n# install it\ncargo add x\n```\n");
+        assert!(sh.iter().any(|l| l.contains("# install it")), "{sh:?}");
     }
 
     #[test]
@@ -635,16 +665,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn finds_intra_doc_links() {
-        let hl = Highlighter::new();
-        let mut links = HashMap::new();
-        links.insert("`None`".to_string(), Id(59));
-        let r = markdown("See [`None`] for details.", &links, 60, &hl);
-        assert_eq!(r.links.len(), 1);
-        assert_eq!(r.links[0].id, Id(59));
-    }
-
     /// Text of the spans a link covers, which is what gets highlighted.
     fn link_text(r: &Rendered, i: usize) -> String {
         let t = &r.links[i];
@@ -654,16 +674,18 @@ mod tests {
             .collect()
     }
 
+    /// An intra-doc link resolves to its item and covers only its own text,
+    /// not the prose around it.
     #[test]
-    fn link_extent_covers_only_the_link_text() {
+    fn finds_intra_doc_links_and_their_extent() {
         let hl = Highlighter::new();
         let mut links = HashMap::new();
         links.insert("`None`".to_string(), Id(59));
         let r = markdown("See [`None`] for details.", &links, 60, &hl);
 
+        assert_eq!(r.links.len(), 1);
+        assert_eq!(r.links[0].id, Id(59));
         assert_eq!(link_text(&r, 0), "None");
-        // The surrounding prose must stay outside the highlighted range.
-        assert!(r.lines[r.links[0].line].width() > 6);
     }
 
     #[test]
@@ -679,22 +701,6 @@ mod tests {
         assert_eq!(link_text(&r, 1), "None");
         assert_eq!(r.links[0].id, Id(1));
         assert_eq!(r.links[1].id, Id(2));
-    }
-
-    #[test]
-    fn link_tags_do_not_survive_into_rendered_spans() {
-        let hl = Highlighter::new();
-        let mut links = HashMap::new();
-        links.insert("`None`".to_string(), Id(59));
-        let r = markdown("See [`None`] for details.", &links, 60, &hl);
-
-        // The tag is an internal marker; leaving it set would paint a stray
-        // underline colour in the terminal.
-        for line in &r.lines {
-            for span in &line.spans {
-                assert!(span.style.underline_color.is_none());
-            }
-        }
     }
 
     #[test]
@@ -727,20 +733,17 @@ mod tests {
         // multi-line tokens.
         let code = "pub fn demo(x: &str) -> Option<u32> {\n    // a comment\n    let n = x.parse().ok()?;\n\n    Some(n + 1)\n}";
 
-        let lines = hl.highlight(code, "rs");
+        let lines = hl.highlight(code);
         assert_eq!(lines.len(), 6, "expected one line per source line");
 
-        let flat: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
+        let flat: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(flat.join("\n"), code);
     }
 
     #[test]
     fn rust_code_is_highlighted() {
         let hl = Highlighter::new();
-        let lines = hl.highlight("let n = 1;", "rs");
+        let lines = hl.highlight("let n = 1;");
         // `let` is a keyword and must be coloured differently from the rest.
         assert!(
             lines[0].spans.iter().any(|s| s.style.fg.is_some()),
@@ -749,69 +752,82 @@ mod tests {
         );
     }
 
-    /// Rust is the only grammar compiled in, so every other fence renders as
-    /// plain text rather than failing.
+    /// A fence naming another language renders as plain text rather than
+    /// being run through the Rust grammar.
     #[test]
-    fn other_languages_fall_back_to_plain_text() {
+    fn other_languages_render_unhighlighted() {
         let hl = Highlighter::new();
-        let lines = hl.highlight("[package]\nname = \"x\"", "toml");
-        assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.spans.len() == 1));
-        assert!(lines.iter().all(|l| l.spans[0].style.fg.is_none()));
+        let r = markdown(
+            "```toml\n[package]\nname = \"x\"\n```\n",
+            &HashMap::new(),
+            60,
+            &hl,
+        );
+        let code = r
+            .lines
+            .iter()
+            .find(|l| l.to_string().contains("[package]"))
+            .expect("no code line");
+        // Gutter, its space, the text, and the padding: no per-token spans.
+        assert_eq!(code.spans.len(), 4, "{code:?}");
     }
 
     #[test]
     fn empty_code_block_does_not_panic() {
         let hl = Highlighter::new();
-        assert!(hl.highlight("", "rs").len() <= 1);
+        assert!(hl.highlight("").len() <= 1);
     }
 
     /// A fenced block is dressed as a slab: every line carries the code
-    /// background out to the full width, with a gutter rule marking its
-    /// extent for terminals that drop the background.
+    /// background, with a gutter rule marking its extent for terminals that
+    /// drop the background.
     #[test]
-    fn code_blocks_are_padded_and_ruled() {
-        const WIDTH: u16 = 60;
+    fn fenced_code_is_dressed_as_a_slab() {
         let hl = Highlighter::new();
-        let r = markdown(
-            "text\n\n```\nlet n = 1;\n```\n",
-            &HashMap::new(),
-            WIDTH,
-            &hl,
-        );
+        let r = markdown("text\n\n```\nlet n = 1;\n```\n", &HashMap::new(), 60, &hl);
 
         let bg = theme::code_block().bg.expect("code bg");
         let code = r
             .lines
             .iter()
-            .find(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .contains("let n = 1;")
-            })
+            .find(|l| l.to_string().contains("let n = 1;"))
             .expect("no code line");
-
-        assert_eq!(code.width(), WIDTH as usize, "code line was not padded out");
+        assert!(code.to_string().starts_with("┃ "), "no gutter rule: {code}");
         assert!(
             code.spans.iter().all(|s| s.style.bg == Some(bg)),
             "a span in the code line missed the background"
         );
-        assert!(
-            WIDTH as usize <= CODE_BLOCK_WIDTH,
-            "this case is meant to render narrower than the cap"
-        );
-        let text: String = code.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("┃ "), "no gutter rule: {text:?}");
 
         // The prose above it is not code and keeps the page background.
         let prose = r
             .lines
             .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "text"))
+            .find(|l| l.to_string() == "text")
             .expect("no prose line");
         assert!(prose.spans.iter().all(|s| s.style.bg.is_none()));
+    }
+
+    /// The slab is padded so a block reads as one piece rather than a ragged
+    /// stripe, but stops at a reading measure, since past it there is only
+    /// empty background. A line longer than that keeps its own length:
+    /// truncating the background partway through the code would look like
+    /// damage.
+    #[test]
+    fn code_slabs_are_padded_up_to_the_reading_measure() {
+        let bg = theme::code_block().bg.expect("code bg");
+        let width = |code: &str, page: usize| {
+            let line = code_line(Line::raw(code.to_string()), page);
+            assert!(line.spans.iter().all(|s| s.style.bg == Some(bg)));
+            line.width()
+        };
+        let long = "y".repeat(CODE_BLOCK_WIDTH);
+
+        assert_eq!(width("let n = 1;", 60), 60, "not padded to the page");
+        assert_eq!(width("let n = 1;", CODE_BLOCK_WIDTH * 2), CODE_BLOCK_WIDTH);
+        assert!(
+            width(&long, CODE_BLOCK_WIDTH * 2) > CODE_BLOCK_WIDTH,
+            "long code was cut"
+        );
     }
 
     /// A paragraph ends with a blank line and a heading starts with one, so
@@ -837,14 +853,7 @@ mod tests {
             assert!(
                 pair[1] - pair[0] > 1,
                 "consecutive blank lines at {pair:?} in {:?}",
-                r.lines
-                    .iter()
-                    .map(|l| l
-                        .spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect::<String>())
-                    .collect::<Vec<_>>()
+                r.lines.iter().map(ToString::to_string).collect::<Vec<_>>()
             );
         }
     }
@@ -864,71 +873,6 @@ mod tests {
         );
 
         assert_eq!(r.links.len(), 1);
-        let t = &r.links[0];
-        let text: String = r.lines[t.line].spans[t.spans.clone()]
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(text, "None");
-    }
-
-    /// Past a comfortable reading measure the slab is empty background, so it
-    /// stops rather than running to the window edge.
-    #[test]
-    fn code_block_backgrounds_stop_at_the_reading_measure() {
-        let hl = Highlighter::new();
-        let wide = CODE_BLOCK_WIDTH as u16 * 2;
-        let r = markdown("```\nlet n = 1;\n```\n", &HashMap::new(), wide, &hl);
-
-        let code = r
-            .lines
-            .iter()
-            .find(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .contains("let n = 1;")
-            })
-            .expect("no code line");
-
-        assert_eq!(
-            code.width(),
-            CODE_BLOCK_WIDTH,
-            "the slab did not stop at the cap"
-        );
-    }
-
-    /// A code line longer than the cap keeps its own length: truncating the
-    /// background partway through the code would look like damage.
-    #[test]
-    fn code_longer_than_the_cap_keeps_its_background() {
-        let hl = Highlighter::new();
-        let long = format!("let x = \"{}\";", "y".repeat(CODE_BLOCK_WIDTH));
-        let r = markdown(
-            &format!("```\n{long}\n```\n"),
-            &HashMap::new(),
-            CODE_BLOCK_WIDTH as u16 * 2,
-            &hl,
-        );
-
-        let bg = theme::code_block().bg.expect("code bg");
-        let code = r
-            .lines
-            .iter()
-            .find(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .contains("yyy")
-            })
-            .expect("no code line");
-
-        assert!(code.width() > CODE_BLOCK_WIDTH, "the case did not overflow");
-        assert!(
-            code.spans.iter().all(|s| s.style.bg == Some(bg)),
-            "the background was cut short of the code"
-        );
+        assert_eq!(link_text(&r, 0), "None");
     }
 }

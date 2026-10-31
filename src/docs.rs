@@ -9,9 +9,15 @@
 //! `Id` to its canonical path (`alloc::string::String`); that path is then
 //! looked up in the crate that actually owns it.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
-use rustdoc_types::{Crate, Id, Item, ItemEnum, ItemKind, ItemSummary, Type};
+use rustdoc_types::{
+    Attribute, Crate, Id, Item, ItemEnum, ItemKind, ItemSummary, Type, Visibility,
+};
+
+use crate::kind;
 
 /// Index of a crate within a [`Universe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -34,17 +40,16 @@ impl ItemRef {
 pub struct Universe {
     crates: Vec<Crate>,
     names: Vec<String>,
-    /// Canonical path (e.g. `alloc::vec::Vec`) to the item that owns it.
+    /// Canonical path (e.g. `alloc::vec::Vec`) to every item claiming it.
     ///
     /// Rust's namespaces are separate, so a path can name more than one item —
-    /// `alloc::vec` is both the `vec!` macro and the `vec` module. This map
-    /// keeps whichever was seen last, which is fine for resolving a link (the
-    /// two are interchangeable as a destination) but not for picking a parent;
-    /// see [`Universe::container_at`].
-    by_path: HashMap<String, ItemRef>,
-    /// Every item claiming a given canonical path, for the collision above.
-    all_by_path: HashMap<String, Vec<ItemRef>>,
-    /// Preferred display path per item, when it differs from the canonical one.
+    /// `alloc::vec` is both the `vec!` macro and the `vec` module. Resolving a
+    /// link takes whichever was seen last, since the two are interchangeable
+    /// as a destination, but picking a parent cannot; see
+    /// [`Universe::container_at`].
+    by_path: HashMap<String, Vec<ItemRef>>,
+    /// The `std::` spelling of each item, where it differs from the canonical
+    /// one: `alloc::vec::Vec` is shown as `std::vec::Vec`.
     display: HashMap<ItemRef, String>,
     /// The type each associated item is declared on, via the impl listing it.
     ///
@@ -55,22 +60,24 @@ pub struct Universe {
 }
 
 impl Universe {
-    /// Build a universe from parsed crates and their names, in matching order.
-    pub fn new(crates: Vec<Crate>, names: Vec<String>) -> Self {
-        assert_eq!(crates.len(), names.len(), "crate/name count mismatch");
+    /// Build a universe from parsed crates, each paired with its name.
+    ///
+    /// The first crate is the one the app opens on; see [`Universe::root`].
+    pub fn new(crates: Vec<(String, Crate)>) -> Self {
+        let (names, crates): (Vec<String>, Vec<Crate>) = crates.into_iter().unzip();
 
         // Map each canonical path to the crate that owns it. `crate_id == 0`
         // means "defined here", so this never records a foreign re-export.
-        let mut by_path = HashMap::new();
-        let mut all_by_path: HashMap<String, Vec<ItemRef>> = HashMap::new();
+        let mut by_path: HashMap<String, Vec<ItemRef>> = HashMap::new();
         for (i, krate) in crates.iter().enumerate() {
             let cid = CrateId(i);
             for (id, summary) in &krate.paths {
                 if summary.crate_id == 0 {
                     let path = summary.path.join("::");
-                    let r = ItemRef::new(cid, *id);
-                    by_path.insert(path.clone(), r);
-                    all_by_path.entry(path).or_default().push(r);
+                    by_path
+                        .entry(path)
+                        .or_default()
+                        .push(ItemRef::new(cid, *id));
                 }
             }
         }
@@ -94,25 +101,140 @@ impl Universe {
             }
         }
 
-        Self {
+        let mut universe = Self {
             crates,
             names,
             by_path,
-            all_by_path,
             display: HashMap::new(),
             owner,
+        };
+        universe.display = universe.display_paths();
+        universe
+    }
+
+    /// The public spelling of every item that has one other than its
+    /// canonical path.
+    ///
+    /// Readers know `Vec` as `std::vec::Vec`, not `alloc::vec::Vec`, so this
+    /// is the name search shows and pages are titled with. Items take the path
+    /// the first crate to expose them gives them — `std` where it does, their
+    /// own crate's public path where `std` only points at them; anything else
+    /// — a method, an internal — is spelled through its nearest ancestor that
+    /// has one.
+    fn display_paths(&self) -> HashMap<ItemRef, String> {
+        let mut reachable = HashMap::new();
+        for cid in self.crate_ids() {
+            for (r, shown) in self.namespace(cid) {
+                reachable.entry(r).or_insert(shown);
+            }
         }
+        let mut ancestors = HashMap::new();
+        for (r, shown) in &reachable {
+            if let Some(s) = self.summary(*r) {
+                prefer(&mut ancestors, s.path.join("::"), shown.clone());
+            }
+        }
+
+        let mut out = HashMap::new();
+        for cid in self.crate_ids() {
+            for (id, summary) in &self.krate(cid).paths {
+                if summary.crate_id != 0 {
+                    continue;
+                }
+                let r = ItemRef::new(cid, *id);
+                let canonical = summary.path.join("::");
+                let shown = match reachable.get(&r) {
+                    Some(shown) => Some(shown.clone()),
+                    None => beneath(&canonical, &ancestors),
+                };
+                if let Some(shown) = shown
+                    && shown != canonical
+                {
+                    out.insert(r, shown);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every item reachable through a crate's public modules, under the
+    /// shortest path that reaches it.
+    ///
+    /// Re-exports are followed through every crate, because that is how the
+    /// names are built: `Formatter` is defined at `core::fmt::Formatter`,
+    /// re-exported by `alloc::fmt`, which `std` re-exports as `std::fmt`.
+    /// Following them rather than mapping module names is also what keeps
+    /// this right as `core` and `alloc` reorganise their internals.
+    fn namespace(&self, krate: CrateId) -> HashMap<ItemRef, String> {
+        let mut shown = HashMap::new();
+        let root = ItemRef::new(krate, self.krate(krate).root);
+        let mut stack = vec![(root, self.crate_name(krate).to_string())];
+        let mut visited = HashSet::new();
+
+        while let Some((module, path)) = stack.pop() {
+            if !visited.insert((module, path.clone())) {
+                continue;
+            }
+            let Some(ItemEnum::Module(m)) = self.item(module).map(|i| &i.inner) else {
+                continue;
+            };
+            for id in &m.items {
+                let Some(child) = self.item(ItemRef::new(module.krate, *id)) else {
+                    continue;
+                };
+                if matches!(
+                    child.visibility,
+                    Visibility::Crate | Visibility::Restricted { .. }
+                ) {
+                    continue;
+                }
+                let (target, at) = match &child.inner {
+                    // `#[doc(no_inline)]` is rustdoc's own word that a
+                    // re-export is a pointer, not a home: the preludes are
+                    // written this way, and the website gives such an item
+                    // no page there.
+                    ItemEnum::Use(_) if is_no_inline(child) => continue,
+                    ItemEnum::Use(u) => {
+                        let Some(target) = u.id.and_then(|id| self.resolve(module.krate, id))
+                        else {
+                            continue;
+                        };
+                        // A glob pours the target's contents into this module:
+                        // `pub use alloc_crate::alloc::*` is what fills
+                        // `std::alloc`, so that is also the name the globbed
+                        // module goes by. (An enum's variants can be globbed
+                        // too, and the enum is not renamed by it.)
+                        if u.is_glob {
+                            if self.is_module(target) {
+                                prefer(&mut shown, target, path.clone());
+                            }
+                            stack.push((target, path.clone()));
+                            continue;
+                        }
+                        (target, format!("{path}::{}", u.name))
+                    }
+                    _ => {
+                        let Some(name) = &child.name else { continue };
+                        (ItemRef::new(module.krate, *id), format!("{path}::{name}"))
+                    }
+                };
+                // Only a module reached by a better path is worth walking
+                // again, which is also what stops re-export cycles.
+                if prefer(&mut shown, target, at.clone()) && self.is_module(target) {
+                    stack.push((target, at));
+                }
+            }
+        }
+        shown
+    }
+
+    fn is_module(&self, r: ItemRef) -> bool {
+        matches!(self.item(r).map(|i| &i.inner), Some(ItemEnum::Module(_)))
     }
 
     /// The type an associated item is declared on, if it is one.
     pub fn owner_of(&self, r: ItemRef) -> Option<ItemRef> {
         self.owner.get(&r).copied()
-    }
-
-    /// Record the user-facing spelling for items whose canonical path differs
-    /// (`alloc::vec::Vec` is shown as `std::vec::Vec`).
-    pub fn set_display_paths(&mut self, display: HashMap<ItemRef, String>) {
-        self.display = display;
     }
 
     pub fn crate_name(&self, krate: CrateId) -> &str {
@@ -149,8 +271,9 @@ impl Universe {
     }
 
     /// Look an item up by its canonical path.
+    #[cfg(test)]
     pub fn by_path(&self, path: &str) -> Option<ItemRef> {
-        self.by_path.get(path).copied()
+        self.by_path.get(path)?.last().copied()
     }
 
     /// Resolve an `Id` encountered while reading crate `from`.
@@ -163,14 +286,21 @@ impl Universe {
         if krate.index.contains_key(&id) {
             return Some(ItemRef::new(from, id));
         }
+        // The foreign path can name items in several namespaces (`alloc::vec`
+        // is a macro and a module); the summary's kind says which was meant.
         let summary = krate.paths.get(&id)?;
-        self.by_path(&summary.path.join("::"))
+        let candidates = self.by_path.get(&summary.path.join("::"))?;
+        candidates
+            .iter()
+            .find(|r| self.kind_of(**r) == Some(summary.kind))
+            .or(candidates.last())
+            .copied()
     }
 
-    /// The canonical path for a reference, as a `::`-joined string.
+    /// The path to show for a reference: `std`'s spelling where it has one,
+    /// the canonical path otherwise.
     ///
-    /// Falls back to walking up the module tree when `paths` has no entry,
-    /// which is common for associated items.
+    /// `None` for items absent from `paths`, such as trait-impl members.
     pub fn path_of(&self, r: ItemRef) -> Option<String> {
         if let Some(p) = self.display.get(&r) {
             return Some(p.clone());
@@ -224,13 +354,51 @@ impl Universe {
     /// nothing, so prefer a module or a type and fall back to whatever is
     /// there for paths with no collision.
     fn container_at(&self, path: &str) -> Option<ItemRef> {
-        let candidates = self.all_by_path.get(path)?;
+        let candidates = self.by_path.get(path)?;
         candidates
             .iter()
-            .find(|r| self.kind_of(**r).is_some_and(is_container))
+            .find(|r| self.kind_of(**r).is_some_and(kind::is_container))
             .or_else(|| candidates.first())
             .copied()
     }
+}
+
+/// Spell a canonical path through its deepest ancestor that has a display
+/// path: methods of `core::option::Option` sit under `std::option::Option`.
+fn beneath(canonical: &str, ancestors: &HashMap<String, String>) -> Option<String> {
+    canonical.rmatch_indices("::").find_map(|(i, _)| {
+        let shown = ancestors.get(&canonical[..i])?;
+        Some(format!("{shown}{}", &canonical[i..]))
+    })
+}
+
+/// Record `path` for `key` unless a shorter spelling is already there, and
+/// report whether it was recorded.
+///
+/// An item can be exposed in more than one place — `HashMap` has a page at
+/// `std::collections` and at `std::collections::hash_map` — and the shorter
+/// is the one people write.
+fn prefer<K: Hash + Eq>(map: &mut HashMap<K, String>, key: K, path: String) -> bool {
+    match map.entry(key) {
+        Entry::Occupied(mut e) => {
+            let better = path.len() < e.get().len();
+            if better {
+                e.insert(path);
+            }
+            better
+        }
+        Entry::Vacant(e) => {
+            e.insert(path);
+            true
+        }
+    }
+}
+
+/// Whether a re-export is marked `#[doc(no_inline)]`.
+fn is_no_inline(item: &Item) -> bool {
+    item.attrs
+        .iter()
+        .any(|a| matches!(a, Attribute::Other(s) if s == "#[doc(no_inline)]"))
 }
 
 /// The id of the type an impl is written for, when it names one.
@@ -241,19 +409,6 @@ fn impl_self_id(t: &Type) -> Option<Id> {
         Type::BorrowedRef { type_, .. } => impl_self_id(type_),
         _ => None,
     }
-}
-
-/// Whether a kind can hold other items, and so can serve as a parent.
-fn is_container(kind: ItemKind) -> bool {
-    matches!(
-        kind,
-        ItemKind::Module
-            | ItemKind::Struct
-            | ItemKind::Enum
-            | ItemKind::Trait
-            | ItemKind::Union
-            | ItemKind::Primitive
-    )
 }
 
 /// Drop the last `::` segment, if there is one to drop.
@@ -273,18 +428,41 @@ mod tests {
     fn resolves_reexports_across_crates() {
         let u = universe();
 
-        // These live in `alloc`/`core` but are reached through `std`.
-        for path in [
-            "alloc::string::String",
-            "alloc::vec::Vec",
-            "core::option::Option",
+        // These live in `alloc`/`core` but are reached, and shown, through `std`.
+        for (path, shown) in [
+            ("alloc::string::String", "std::string::String"),
+            ("alloc::vec::Vec", "std::vec::Vec"),
+            ("core::option::Option", "std::option::Option"),
         ] {
             let r = u
                 .by_path(path)
                 .unwrap_or_else(|| panic!("{path} not found"));
             assert!(u.item(r).is_some(), "{path} resolved to a missing item");
-            assert_eq!(u.path_of(r).as_deref(), Some(path));
+            assert_eq!(u.path_of(r).as_deref(), Some(shown));
         }
+    }
+
+    /// What std does not expose by name is spelled through the nearest
+    /// ancestor it does, however deep that ancestor sits in its own crate.
+    #[test]
+    fn items_take_the_std_name_of_their_nearest_exposed_ancestor() {
+        let ancestors = HashMap::from([
+            ("alloc::rcs::rc".to_string(), "std::rc".to_string()),
+            (
+                "core::option::Option".to_string(),
+                "std::option::Option".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            beneath("alloc::rcs::rc::Rc", &ancestors).as_deref(),
+            Some("std::rc::Rc")
+        );
+        assert_eq!(
+            beneath("core::option::Option::map", &ancestors).as_deref(),
+            Some("std::option::Option::map")
+        );
+        // Nothing above it is exposed, so there is nothing to spell it with.
+        assert_eq!(beneath("core::core_arch::x86::foo", &ancestors), None);
     }
 
     /// `u` walks up the chain a reader actually sees: method -> type ->
@@ -292,9 +470,7 @@ mod tests {
     /// one.
     #[test]
     fn parent_walks_up_to_the_crate_root() {
-        let mut u = universe();
-        let idx = crate::index::SearchIndex::build(&u);
-        u.set_display_paths(idx.display_paths());
+        let u = universe();
 
         let start = u
             .by_path("alloc::string::String::push_str")
@@ -313,9 +489,7 @@ mod tests {
     /// since `std::vec` is not itself a key in `by_path`.
     #[test]
     fn parent_of_a_reexported_type_finds_its_module() {
-        let mut u = universe();
-        let idx = crate::index::SearchIndex::build(&u);
-        u.set_display_paths(idx.display_paths());
+        let u = universe();
 
         let vec = u.by_path("alloc::vec::Vec").expect("Vec");
         let parent = u.parent_of(vec).expect("Vec has a parent module");

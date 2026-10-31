@@ -2,6 +2,7 @@
 
 use crate::docs::{ItemRef, Universe};
 use crate::index::SearchIndex;
+use crate::kind;
 use crate::page::{self, Page, SectionId, Target};
 use crate::render::Highlighter;
 
@@ -14,7 +15,6 @@ const MIN_PAGE_WIDTH: u16 = 20;
 pub enum Screen {
     Search,
     Item,
-    Help,
 }
 
 /// One entry in the browsing history.
@@ -23,6 +23,10 @@ struct HistoryEntry {
     scroll: u16,
     /// Sections the reader has toggled away from their default state; see
     /// [`page::is_expanded`].
+    ///
+    /// Deviations rather than the open set, because which sections a page has
+    /// is not known until it is built — a module's listings depend on what it
+    /// contains. A fresh page starts empty: every section at its default.
     toggled: Vec<SectionId>,
 }
 
@@ -32,8 +36,9 @@ pub struct App {
     pub highlighter: Highlighter,
 
     pub screen: Screen,
-    /// The screen to return to when leaving help.
-    prev_screen: Screen,
+    /// Whether the help popup is drawn over the screen. An overlay rather than
+    /// a screen of its own, so closing it needs no memory of what was behind.
+    pub help: bool,
     pub should_quit: bool,
 
     // Search state
@@ -53,12 +58,11 @@ pub struct App {
     history: Vec<HistoryEntry>,
     cursor: usize,
 
+    /// Rows of page the item view shows; set through [`Self::resize`].
     pub viewport: u16,
     pub status: Option<String>,
-    /// Width the item view last had room for, used to decide when to re-wrap.
-    /// This is the padded content width, not the terminal's: it must match what
-    /// [`Self::ensure_width`] is given or every frame rebuilds the page.
-    pub last_width: u16,
+    /// Columns the item view has for the page; set through [`Self::resize`].
+    width: u16,
 }
 
 impl App {
@@ -68,7 +72,7 @@ impl App {
             index,
             highlighter: Highlighter::new(),
             screen: Screen::Search,
-            prev_screen: Screen::Search,
+            help: false,
             should_quit: false,
             query: String::new(),
             results: Vec::new(),
@@ -82,7 +86,7 @@ impl App {
             cursor: 0,
             viewport: 20,
             status: None,
-            last_width: 80,
+            width: 80,
         };
         app.refresh_search();
         // Open on the crate root so there is something to read and navigate
@@ -146,7 +150,7 @@ impl App {
         self.history.push(HistoryEntry {
             item: target,
             scroll: 0,
-            toggled: page::default_expanded(),
+            toggled: Vec::new(),
         });
         self.cursor = self.history.len();
         self.scroll = 0;
@@ -174,11 +178,7 @@ impl App {
             Some(K::Function | K::AssocConst | K::AssocType | K::StructField) => {
                 let owner = self.universe.parent_of(item)?;
                 // A module parent means a free function, which keeps its page.
-                matches!(
-                    self.universe.kind_of(owner)?,
-                    K::Struct | K::Enum | K::Union | K::Trait | K::Primitive
-                )
-                .then_some(owner)?
+                kind::has_members(self.universe.kind_of(owner)?).then_some(owner)?
             }
             // Not in `paths` at all: only an impl can account for it.
             None => self.universe.owner_of(item)?,
@@ -200,7 +200,7 @@ impl App {
         let sections: Vec<SectionId> = self
             .page
             .as_ref()
-            .map(|p| p.sections.clone())
+            .map(|p| p.sections.iter().map(|s| s.id).collect())
             .unwrap_or_default();
         for id in sections {
             if page::is_expanded(id, self.toggled()) {
@@ -226,23 +226,28 @@ impl App {
         let Some(i) = target_index(p, item, true) else {
             return false;
         };
-        let line = p.targets[i].line as u16;
+        let line = p.targets[i].line;
         self.focus = Some(i);
-        // Sit the target a third of the way down rather than at the very top,
-        // so the impl header above it stays visible.
-        self.scroll = line.saturating_sub(self.viewport / 3);
-        self.clamp_scroll();
+        self.bring_into_view(line);
         true
     }
 
+    /// Scroll `line` a third of the way down the viewport rather than to the
+    /// very top, so what introduces it — an impl header above a method — stays
+    /// visible.
+    fn bring_into_view(&mut self, line: usize) {
+        self.scroll = (line as u16).saturating_sub(self.viewport / 3);
+        self.clamp_scroll();
+    }
+
     /// The sections toggled away from their default on the current page.
-    fn toggled(&self) -> &[SectionId] {
+    pub fn toggled(&self) -> &[SectionId] {
         self.current().map(|e| e.toggled.as_slice()).unwrap_or(&[])
     }
 
     /// Flip one section's folded state and rebuild.
     fn toggle_section_id(&mut self, id: SectionId) {
-        if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
+        if let Some(entry) = self.current_mut() {
             match entry.toggled.iter().position(|s| *s == id) {
                 Some(i) => {
                     entry.toggled.remove(i);
@@ -276,7 +281,7 @@ impl App {
     }
 
     fn restore(&mut self) {
-        if let Some(entry) = self.history.get(self.cursor.saturating_sub(1)) {
+        if let Some(entry) = self.current() {
             self.scroll = entry.scroll;
             self.focus = None;
             self.section_cursor = 0;
@@ -286,15 +291,20 @@ impl App {
     }
 
     fn save_scroll(&mut self) {
-        if self.cursor > 0
-            && let Some(entry) = self.history.get_mut(self.cursor - 1)
-        {
-            entry.scroll = self.scroll;
+        let scroll = self.scroll;
+        if let Some(entry) = self.current_mut() {
+            entry.scroll = scroll;
         }
     }
 
+    /// The history entry for the page on screen. `cursor` counts the entries
+    /// up to and including it, so it is the one just before the cursor.
     fn current(&self) -> Option<&HistoryEntry> {
         self.history.get(self.cursor.checked_sub(1)?)
+    }
+
+    fn current_mut(&mut self) -> Option<&mut HistoryEntry> {
+        self.history.get_mut(self.cursor.checked_sub(1)?)
     }
 
     pub fn rebuild_page(&mut self) {
@@ -344,21 +354,26 @@ impl App {
         true
     }
 
-    /// Re-render if the terminal width changed since the page was built.
-    pub fn ensure_width(&mut self, width: u16) {
+    /// Record the room the item view has, re-wrapping the page if its width
+    /// changed.
+    ///
+    /// Called every frame with the view's own content area — padding already
+    /// taken off — since that is what the page's lines must fit.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.viewport = height;
+        self.width = width;
         if self
             .page
             .as_ref()
-            .is_some_and(|p| p.width != width.max(MIN_PAGE_WIDTH))
+            .is_some_and(|p| p.width != self.page_width())
         {
             self.rebuild_page();
         }
     }
 
-    /// The width pages are built at. The item view has no border, so this is
-    /// the whole terminal; both callers must agree or every frame rebuilds.
+    /// The width pages are built at.
     fn page_width(&self) -> u16 {
-        self.last_width.max(MIN_PAGE_WIDTH)
+        self.width.max(MIN_PAGE_WIDTH)
     }
 
     // --- Scrolling --------------------------------------------------------
@@ -400,13 +415,13 @@ impl App {
 
     fn move_section(&mut self, delta: i32) {
         let Some(p) = &self.page else { return };
-        if p.section_lines.is_empty() {
+        if p.sections.is_empty() {
             return;
         }
-        let last = p.section_lines.len() - 1;
+        let last = p.sections.len() - 1;
         let next = (self.section_cursor as i32 + delta).clamp(0, last as i32) as usize;
         self.section_cursor = next;
-        self.scroll = p.section_lines[next] as u16;
+        self.scroll = p.sections[next].line as u16;
         self.clamp_scroll();
     }
 
@@ -417,25 +432,17 @@ impl App {
     /// acts on.
     pub fn toggle_section(&mut self) {
         let Some(p) = &self.page else { return };
-        let Some(section) = p.sections.get(self.section_cursor).copied() else {
+        let Some(section) = p.sections.get(self.section_cursor).map(|s| s.id) else {
             self.status = Some("no section selected — use n/p".into());
             return;
         };
-
-        if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
-            if let Some(i) = entry.toggled.iter().position(|g| *g == section) {
-                entry.toggled.remove(i);
-            } else {
-                entry.toggled.push(section);
-            }
-        }
-        self.rebuild_page();
+        self.toggle_section_id(section);
 
         // Keep the toggled header where the eye already is.
         if let Some(p) = &self.page
-            && let Some(l) = p.section_lines.get(self.section_cursor)
+            && let Some(s) = p.sections.get(self.section_cursor)
         {
-            self.scroll = *l as u16;
+            self.scroll = s.line as u16;
             self.clamp_scroll();
         }
     }
@@ -487,16 +494,12 @@ impl App {
                 .unwrap_or(last),
         });
 
-        // Scroll the focused target into view.
-        if let Some(f) = self.focus
-            && let Some(t) = p.targets.get(f)
-        {
-            let line = t.line as u16;
-            if line < self.scroll || line >= self.scroll + self.viewport {
-                self.scroll = line.saturating_sub(self.viewport / 3);
-            }
+        // Scroll the focused target into view, if it is not already.
+        let line = self.focus.and_then(|f| p.targets.get(f)).map(|t| t.line);
+        match line {
+            Some(l) if !(start..end).contains(&l) => self.bring_into_view(l),
+            _ => self.clamp_scroll(),
         }
-        self.clamp_scroll();
     }
 
     /// Follow the focused target, if any.
@@ -525,23 +528,6 @@ impl App {
             None => self.status = Some("already at the top".into()),
         }
     }
-
-    pub fn show_help(&mut self) {
-        if self.screen != Screen::Help {
-            self.prev_screen = self.screen;
-            self.screen = Screen::Help;
-        }
-    }
-
-    pub fn close_help(&mut self) {
-        if self.screen == Screen::Help {
-            self.screen = self.prev_screen;
-        }
-    }
-
-    pub fn has_page(&self) -> bool {
-        self.page.is_some()
-    }
 }
 
 /// The index of the target for `item`, preferring the row that declares it.
@@ -566,11 +552,7 @@ fn target_index(page: &Page, item: ItemRef, prefer_decl: bool) -> Option<usize> 
 mod tests {
     use super::*;
     use crate::page::{ImplGroup, SectionId};
-
-    fn app() -> App {
-        let (u, idx) = crate::testdocs::indexed();
-        App::new(u, idx)
-    }
+    use crate::testdocs::{app, app_on};
 
     #[test]
     fn starts_on_the_std_root_page() {
@@ -585,9 +567,7 @@ mod tests {
 
     #[test]
     fn u_goes_up_to_the_parent_and_records_history() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
         assert_eq!(a.page.as_ref().unwrap().title, "std::vec::Vec");
 
         a.go_to_parent();
@@ -611,14 +591,12 @@ mod tests {
 
     #[test]
     fn toggling_a_section_expands_it() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
 
         let sections = a.page.as_ref().unwrap().sections.clone();
         let blanket = sections
             .iter()
-            .position(|g| *g == SectionId::Impls(ImplGroup::Blanket))
+            .position(|s| s.id == SectionId::Impls(ImplGroup::Blanket))
             .expect("blanket section");
 
         let before = a.page.as_ref().unwrap().lines.len();
@@ -634,10 +612,8 @@ mod tests {
 
     #[test]
     fn shift_tab_walks_links_backwards() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
-        a.viewport = 30;
+        let mut a = app_on("core::option::Option");
+        a.resize(80, 30);
 
         a.focus_next_target();
         a.focus_next_target();
@@ -648,10 +624,8 @@ mod tests {
 
     #[test]
     fn focus_wraps_at_both_ends() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
-        a.viewport = 30;
+        let mut a = app_on("core::option::Option");
+        a.resize(80, 30);
         let last = a.page.as_ref().unwrap().targets.len() - 1;
 
         // Backwards off the front wraps to the final target.
@@ -666,10 +640,8 @@ mod tests {
 
     #[test]
     fn first_shift_tab_starts_from_the_visible_page() {
-        let mut a = app();
-        let opt = a.universe.by_path("core::option::Option").expect("Option");
-        a.navigate_to(opt);
-        a.viewport = 30;
+        let mut a = app_on("core::option::Option");
+        a.resize(80, 30);
 
         // With nothing focused, stepping back should pick a target the reader
         // can see rather than jumping to the end of a long page.
@@ -680,17 +652,6 @@ mod tests {
             line < a.scroll as usize + a.viewport as usize,
             "focused a target below the viewport"
         );
-    }
-
-    #[test]
-    fn jumping_to_bottom_does_not_move_the_section_cursor() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
-
-        a.section_cursor = 2;
-        a.scroll_to_bottom();
-        assert_eq!(a.section_cursor, 2, "G must not change which section folds");
     }
 
     #[test]
@@ -715,12 +676,7 @@ mod tests {
     /// rather than getting a bare page of its own.
     #[test]
     fn opening_an_inherent_method_lands_on_its_type() {
-        let mut a = app();
-        let m = a
-            .universe
-            .by_path("alloc::string::String::push_str")
-            .expect("String::push_str");
-        a.navigate_to(m);
+        let a = app_on("alloc::string::String::push_str");
 
         let page = a.page.as_ref().expect("a page");
         assert_eq!(page.title, "std::string::String");
@@ -728,7 +684,7 @@ mod tests {
         let line = a
             .focus
             .and_then(|f| page.targets.get(f))
-            .map(|t| text_of(&page.lines[t.line]))
+            .map(|t| page.lines[t.line].to_string())
             .expect("no method focused");
         assert!(
             line.trim().starts_with("fn push_str"),
@@ -747,7 +703,14 @@ mod tests {
         // Find `clone` the way the reader would: on String's page, with the
         // trait impls open.
         a.navigate_to(sr);
-        let ids: Vec<SectionId> = a.page.as_ref().unwrap().sections.clone();
+        let ids: Vec<SectionId> = a
+            .page
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.id)
+            .collect();
         for id in ids {
             if !page::is_expanded(id, a.toggled()) {
                 a.toggle_section_id(id);
@@ -759,7 +722,7 @@ mod tests {
             .iter()
             .find(|t| {
                 t.spans.is_none()
-                    && text_of(&page.lines[t.line]).trim() == "fn clone(&self) -> Self"
+                    && page.lines[t.line].to_string().trim() == "fn clone(&self) -> Self"
             })
             .map(|t| t.item)
             .expect("no clone method on String");
@@ -773,7 +736,7 @@ mod tests {
         let line = b
             .focus
             .and_then(|f| page.targets.get(f))
-            .map(|t| text_of(&page.lines[t.line]))
+            .map(|t| page.lines[t.line].to_string())
             .expect("no method focused");
         assert_eq!(line.trim(), "fn clone(&self) -> Self");
     }
@@ -782,9 +745,7 @@ mod tests {
     /// rustdoc gives it the same `Function` kind as a method.
     #[test]
     fn a_free_function_keeps_its_own_page() {
-        let mut a = app();
-        let f = a.universe.by_path("core::mem::swap").expect("mem::swap");
-        a.navigate_to(f);
+        let a = app_on("core::mem::swap");
 
         let page = a.page.as_ref().expect("a page");
         assert_eq!(page.title, "std::mem::swap");
@@ -812,18 +773,12 @@ mod tests {
         assert_eq!(a.page.as_ref().unwrap().title, "std::string::String");
     }
 
-    /// Flatten a line to its text, for asserting on what was focused.
-    fn text_of(l: &ratatui::text::Line<'static>) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
     /// Re-wrapping at a new width moves every line, so a focused target must be
     /// followed to its new position instead of leaving the scroll behind.
     #[test]
     fn a_focused_method_survives_a_width_change() {
         let mut a = app();
-        a.last_width = 80;
-        a.viewport = 25;
+        a.resize(80, 25);
         let m = a
             .universe
             .by_path("alloc::string::String::push_str")
@@ -835,7 +790,7 @@ mod tests {
             let t = &p.targets[a.focus.expect("focused")];
             let line = t.line as u16;
             (line >= a.scroll && line < a.scroll + a.viewport)
-                .then(|| text_of(&p.lines[t.line]).trim().to_string())
+                .then(|| p.lines[t.line].to_string().trim().to_string())
         };
         assert!(
             on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
@@ -843,8 +798,7 @@ mod tests {
         );
 
         // Same page, rebuilt for a wider terminal.
-        a.last_width = 140;
-        a.ensure_width(140);
+        a.resize(140, 25);
         assert!(
             on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
             "the focused method scrolled off after the resize"

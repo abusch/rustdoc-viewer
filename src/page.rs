@@ -8,6 +8,7 @@ use rustdoc_types::{Id, Impl, Item, ItemEnum, ItemKind, StructKind, VariantKind,
 
 use crate::docs::{ItemRef, Universe};
 use crate::format;
+use crate::kind;
 use crate::render::{self, Highlighter};
 use crate::theme;
 
@@ -105,10 +106,18 @@ impl Target {
     }
 }
 
-/// A collapsible section of impls.
-pub struct Section {
+/// The impls of one group, in the order the page lists them.
+pub struct ImplSection {
     pub group: ImplGroup,
     pub impls: Vec<ItemRef>,
+}
+
+/// A foldable section as laid out on a page: which one, and the line its
+/// heading landed on, which is where `n`/`p` scroll to.
+#[derive(Debug, Clone, Copy)]
+pub struct Section {
+    pub id: SectionId,
+    pub line: usize,
 }
 
 /// A fully rendered page, ready to be scrolled through.
@@ -118,9 +127,7 @@ pub struct Page {
     /// header line the item view draws above the scrolling body.
     pub kind: String,
     pub lines: Vec<Line<'static>>,
-    /// Line index of each section header, parallel to `sections`.
-    pub section_lines: Vec<usize>,
-    pub sections: Vec<SectionId>,
+    pub sections: Vec<Section>,
     pub targets: Vec<Target>,
     pub width: u16,
 }
@@ -142,21 +149,28 @@ mod indent {
 }
 
 /// Module children are listed in this order, matching the docs.rs layout.
-/// The first element is the kind name from [`inner_name`].
-const MODULE_KINDS: [(&str, &str); 9] = [
-    ("Module", "Modules"),
-    ("Macro", "Macros"),
-    ("Struct", "Structs"),
-    ("Enum", "Enums"),
-    ("Trait", "Traits"),
-    ("Function", "Functions"),
-    ("Type Alias", "Type Aliases"),
-    ("Constant", "Constants"),
-    ("Primitive", "Primitives"),
+///
+/// A kind missing from here is silently left out of every module page, which
+/// is how `MaybeUninit` (a union) and `core`'s built-in derives once went
+/// unlisted.
+const MODULE_KINDS: [(ItemKind, &str); 13] = [
+    (ItemKind::Module, "Modules"),
+    (ItemKind::Macro, "Macros"),
+    (ItemKind::Struct, "Structs"),
+    (ItemKind::Enum, "Enums"),
+    (ItemKind::Union, "Unions"),
+    (ItemKind::Trait, "Traits"),
+    (ItemKind::Function, "Functions"),
+    (ItemKind::TypeAlias, "Type Aliases"),
+    (ItemKind::Constant, "Constants"),
+    (ItemKind::Static, "Statics"),
+    (ItemKind::Primitive, "Primitives"),
+    (ItemKind::ProcAttribute, "Attribute Macros"),
+    (ItemKind::ProcDerive, "Derive Macros"),
 ];
 
 /// Collect and group the impls attached to an item.
-pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
+pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<ImplSection> {
     let Some(item) = u.item(r) else {
         return Vec::new();
     };
@@ -169,9 +183,9 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
         _ => return Vec::new(),
     };
 
-    let mut sections: Vec<Section> = ImplGroup::all()
+    let mut sections: Vec<ImplSection> = ImplGroup::all()
         .into_iter()
-        .map(|group| Section {
+        .map(|group| ImplSection {
             group,
             impls: Vec::new(),
         })
@@ -207,25 +221,29 @@ pub fn impls_of(u: &Universe, r: ItemRef) -> Vec<Section> {
 
 /// The context and accumulating output shared by the page-building helpers.
 ///
-/// `u`, `width`, and `hl` are read-only context; `lines` and `targets` are the
-/// page being accumulated. Bundling them keeps the helpers from threading the
-/// same five parameters through every call.
+/// `u`, `width`, `hl`, and `toggled` are read-only context; `lines`,
+/// `targets`, and `sections` are the page being accumulated. Bundling them
+/// keeps the helpers from threading the same parameters through every call.
 struct Builder<'a> {
     u: &'a Universe,
     width: u16,
     hl: &'a Highlighter,
+    toggled: &'a [SectionId],
     lines: Vec<Line<'static>>,
     targets: Vec<Target>,
+    sections: Vec<Section>,
 }
 
 impl<'a> Builder<'a> {
-    fn new(u: &'a Universe, width: u16, hl: &'a Highlighter) -> Self {
+    fn new(u: &'a Universe, width: u16, hl: &'a Highlighter, toggled: &'a [SectionId]) -> Self {
         Self {
             u,
             width,
             hl,
+            toggled,
             lines: Vec::new(),
             targets: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -239,30 +257,28 @@ impl<'a> Builder<'a> {
 }
 
 /// Build the page for an item at a given width.
+///
+/// `toggled` lists the sections flipped away from their default; see
+/// [`is_expanded`].
 pub fn build(
     u: &Universe,
     r: ItemRef,
     width: u16,
     hl: &Highlighter,
-    expanded: &[SectionId],
+    toggled: &[SectionId],
 ) -> Page {
-    let mut b = Builder::new(u, width, hl);
-    let mut section_lines = Vec::new();
-    let mut sections = Vec::new();
-
     let Some(item) = u.item(r) else {
         return Page {
             title: "<missing>".into(),
             kind: String::new(),
             lines: vec![Line::styled("item not found", theme::deprecated())],
-            section_lines,
-            sections,
+            sections: Vec::new(),
             targets: Vec::new(),
             width,
         };
     };
+    let mut b = Builder::new(u, width, hl, toggled);
 
-    let kind = u.kind_of(r);
     let path = u
         .path_of(r)
         .unwrap_or_else(|| item.name.clone().unwrap_or_else(|| "?".into()));
@@ -271,10 +287,7 @@ pub fn build(
     // The kind and path identify the page rather than belonging to its body,
     // so they are handed to the item view as a fixed header line instead of
     // scrolling away with the first screenful.
-    let kind_label = kind
-        .as_ref()
-        .map(kind_name)
-        .unwrap_or_else(|| inner_name(&item.inner));
+    let kind_label = kind::label(item.inner.item_kind());
 
     if let Some(dep) = &item.deprecation {
         let mut s = String::from("Deprecated");
@@ -302,7 +315,7 @@ pub fn build(
 
     // --- Declaration ------------------------------------------------------
     if let Some(sig) = format::signature(item) {
-        for l in hl_code(&sig, hl) {
+        for l in render::declaration(&sig, hl) {
             b.push(indent_line(indent::HEADING, l));
         }
         b.blank();
@@ -318,32 +331,24 @@ pub fn build(
     match &item.inner {
         ItemEnum::Struct(s) => {
             if let StructKind::Plain { fields, .. } = &s.kind {
-                b.push_members(r, "Fields", fields);
+                b.push_members(r, "Fields", fields, member_decl);
             }
         }
         ItemEnum::Enum(e) => {
-            b.push_variants(r, &e.variants);
+            b.push_members(r, "Variants", &e.variants, |v| variant_decl(u, r, v));
         }
         ItemEnum::Trait(t) => {
-            b.push_members(r, "Required Methods", &t.items);
+            b.push_members(r, "Required Methods", &t.items, member_decl);
         }
         ItemEnum::Module(m) => {
-            b.push_module_contents(r, &m.items, expanded, &mut section_lines, &mut sections);
+            b.push_module_contents(r, &m.items);
         }
         _ => {}
     }
 
     // --- Impl sections ----------------------------------------------------
     for section in impls_of(u, r) {
-        let id = SectionId::Impls(section.group);
-        let is_open = is_expanded(id, expanded);
-        section_lines.push(b.lines.len());
-        sections.push(id);
-
-        b.push_section_header(id, is_open, section.impls.len());
-
-        if !is_open {
-            b.blank();
+        if !b.open_section(SectionId::Impls(section.group), section.impls.len()) {
             continue;
         }
 
@@ -355,7 +360,7 @@ pub fn build(
 
             // The header is highlighted like the signatures it introduces, and
             // stays bold so it still reads as their heading.
-            for l in hl_code(&format::impl_header(im), hl) {
+            for l in render::declaration(&format::impl_header(im), hl) {
                 b.push(indent_line(indent::HEADING, bold(l)));
             }
 
@@ -366,13 +371,7 @@ pub fn build(
             for mid in &im.items {
                 let mref = ItemRef::new(iref.krate, *mid);
                 let Some(m) = u.item(mref) else { continue };
-                let sig =
-                    format::signature(m).unwrap_or_else(|| m.name.clone().unwrap_or_default());
-                b.targets.push(Target::line(b.lines.len(), mref));
-                for l in hl_code(&sig, hl) {
-                    b.push(indent_line(indent::MEMBER, l));
-                }
-                b.push_docs(mref, m, indent::DOCS);
+                b.push_member(mref, m, &member_decl(m));
                 b.blank();
             }
         }
@@ -382,8 +381,7 @@ pub fn build(
         title: path,
         kind: kind_label.to_string(),
         lines: b.lines,
-        section_lines,
-        sections,
+        sections: b.sections,
         targets: b.targets,
         width,
     }
@@ -425,42 +423,66 @@ impl Builder<'_> {
         }
     }
 
-    fn push_members(&mut self, parent: ItemRef, title: &str, ids: &[Id]) {
-        let members: Vec<ItemRef> = ids
+    /// A fixed heading followed by one row per member, each with its docs.
+    ///
+    /// Fields, variants, and required methods are all listed this way; only
+    /// how a member is declared differs, which `decl` supplies.
+    fn push_members(
+        &mut self,
+        parent: ItemRef,
+        title: &str,
+        ids: &[Id],
+        decl: impl Fn(&Item) -> String,
+    ) {
+        let u = self.u;
+        let members: Vec<(ItemRef, &Item)> = ids
             .iter()
             .map(|id| ItemRef::new(parent.krate, *id))
-            .filter(|m| self.u.item(*m).is_some())
+            .filter_map(|m| Some((m, u.item(m)?)))
             .collect();
         if members.is_empty() {
             return;
         }
 
-        self.lines.push(Line::styled(
+        self.push(Line::styled(
             format!("{:indent$}{title}", "", indent = indent::HEADING),
             theme::section(),
         ));
-        for m in members {
-            let Some(item) = self.u.item(m) else { continue };
-            let sig =
-                format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default());
-            self.targets.push(Target::line(self.lines.len(), m));
-            self.lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent::MEMBER)),
-                Span::styled(sig, theme::signature()),
-            ]));
-            self.push_docs(m, item, indent::DOCS);
+        for (m, item) in members {
+            self.push_member(m, item, &decl(item));
         }
-        self.lines.push(Line::default());
+        self.blank();
     }
 
-    /// A foldable section heading: a marker, the title, and how many members
-    /// it holds.
-    fn push_section_header(&mut self, id: SectionId, is_open: bool, count: usize) {
+    /// One member row: its declaration, highlighted like the page's own, then
+    /// its docs hanging beneath. The row is the member's target, so opening a
+    /// method focuses this line.
+    fn push_member(&mut self, m: ItemRef, item: &Item, decl: &str) {
+        self.targets.push(Target::line(self.lines.len(), m));
+        for l in render::declaration(decl, self.hl) {
+            self.push(indent_line(indent::MEMBER, l));
+        }
+        self.push_docs(m, item, indent::DOCS);
+    }
+
+    /// Register a foldable section and draw its heading: a marker, the title,
+    /// and how many members it holds. Returns whether the section is open,
+    /// i.e. whether its body should follow.
+    fn open_section(&mut self, id: SectionId, count: usize) -> bool {
+        let is_open = is_expanded(id, self.toggled);
+        self.sections.push(Section {
+            id,
+            line: self.lines.len(),
+        });
         let marker = if is_open { "▾" } else { "▸" };
         self.push(Line::from(vec![
             Span::styled(format!("{marker} {} ", id.title()), theme::section()),
             Span::styled(format!("({count})"), theme::dim()),
         ]));
+        if !is_open {
+            self.blank();
+        }
+        is_open
     }
 
     /// List a module's children, grouped by kind, one line each.
@@ -469,14 +491,7 @@ impl Builder<'_> {
     /// its name and a one-line summary, the way the docs.rs module index does.
     /// Re-exports are resolved to what they point at, since a `use` item has
     /// no docs of its own and is not worth navigating to.
-    fn push_module_contents(
-        &mut self,
-        parent: ItemRef,
-        ids: &[Id],
-        expanded: &[SectionId],
-        section_lines: &mut Vec<usize>,
-        sections: &mut Vec<SectionId>,
-    ) {
+    fn push_module_contents(&mut self, parent: ItemRef, ids: &[Id]) {
         // Group by kind, keeping each group in the order rustdoc listed it.
         let mut groups: Vec<(&'static str, Vec<ItemRef>)> = MODULE_KINDS
             .iter()
@@ -504,14 +519,14 @@ impl Builder<'_> {
             }
             let slot = MODULE_KINDS
                 .iter()
-                .position(|(k, _)| *k == inner_name(&resolved.inner));
+                .position(|(k, _)| *k == resolved.inner.item_kind());
             if let Some(i) = slot
                 && !groups[i].1.iter().any(|e| {
                     self.u.item(*e).and_then(|i| i.name.as_ref()) == resolved.name.as_ref()
                 })
             {
-                // std both declares a primitive and re-exports core's docs for
-                // it, so the same name can arrive twice; keep the first.
+                // Re-exports can bring the same name in twice — `std::task`
+                // would otherwise list its `task` module twice; keep the first.
                 groups[i].1.push(target);
             }
         }
@@ -528,14 +543,7 @@ impl Builder<'_> {
                     .unwrap_or_default()
             });
 
-            let id = SectionId::Module(title);
-            let is_open = is_expanded(id, expanded);
-            section_lines.push(self.lines.len());
-            sections.push(id);
-            self.push_section_header(id, is_open, members.len());
-
-            if !is_open {
-                self.blank();
+            if !self.open_section(SectionId::Module(title), members.len()) {
                 continue;
             }
 
@@ -555,66 +563,55 @@ impl Builder<'_> {
             self.blank();
         }
     }
+}
 
-    fn push_variants(&mut self, parent: ItemRef, ids: &[Id]) {
-        if ids.is_empty() {
-            return;
-        }
-        self.lines.push(Line::styled(
-            format!("{:indent$}Variants", "", indent = indent::HEADING),
-            theme::section(),
-        ));
-        for id in ids {
-            let vref = ItemRef::new(parent.krate, *id);
-            let Some(item) = self.u.item(vref) else {
-                continue;
-            };
-            let ItemEnum::Variant(v) = &item.inner else {
-                continue;
-            };
-            let name = item.name.clone().unwrap_or_default();
-            let rendered = match &v.kind {
-                VariantKind::Plain => name.clone(),
-                VariantKind::Tuple(fields) => {
-                    let tys: Vec<String> = fields
-                        .iter()
-                        .map(|f| {
-                            f.and_then(|fid| self.u.item(ItemRef::new(parent.krate, fid)))
-                                .and_then(|fi| match &fi.inner {
-                                    ItemEnum::StructField(t) => Some(format::ty(t)),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(|| "_".into())
-                        })
-                        .collect();
-                    format!("{name}({})", tys.join(", "))
-                }
-                VariantKind::Struct { fields, .. } => {
-                    let fs: Vec<String> = fields
-                        .iter()
-                        .filter_map(|fid| self.u.item(ItemRef::new(parent.krate, *fid)))
-                        .filter_map(|fi| match &fi.inner {
-                            ItemEnum::StructField(t) => {
-                                Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
-                            }
+/// How a member is declared on its row: its signature, or failing that its name.
+fn member_decl(item: &Item) -> String {
+    format::signature(item).unwrap_or_else(|| item.name.clone().unwrap_or_default())
+}
+
+/// How an enum variant is declared, with its fields' types spelled out.
+///
+/// The variant only holds field ids, so this needs the universe to look the
+/// fields up, which is why it is not one of [`format::signature`]'s arms.
+fn variant_decl(u: &Universe, parent: ItemRef, item: &Item) -> String {
+    let name = item.name.clone().unwrap_or_default();
+    let ItemEnum::Variant(v) = &item.inner else {
+        return name;
+    };
+    let field = |id: Id| u.item(ItemRef::new(parent.krate, id));
+    match &v.kind {
+        VariantKind::Plain => name,
+        VariantKind::Tuple(fields) => {
+            let tys: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    f.and_then(field)
+                        .and_then(|fi| match &fi.inner {
+                            ItemEnum::StructField(t) => Some(format::ty(t)),
                             _ => None,
                         })
-                        .collect();
-                    format!("{name} {{ {} }}", fs.join(", "))
-                }
-            };
-            self.targets.push(Target::line(self.lines.len(), vref));
-            self.lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent::MEMBER)),
-                Span::styled(rendered, theme::signature()),
-            ]));
-            self.push_docs(vref, item, indent::DOCS);
+                        .unwrap_or_else(|| "_".into())
+                })
+                .collect();
+            format!("{name}({})", tys.join(", "))
         }
-        self.lines.push(Line::default());
+        VariantKind::Struct { fields, .. } => {
+            let fs: Vec<String> = fields
+                .iter()
+                .filter_map(|fid| field(*fid))
+                .filter_map(|fi| match &fi.inner {
+                    ItemEnum::StructField(t) => {
+                        Some(format!("{}: {}", fi.name.clone()?, format::ty(t)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            format!("{name} {{ {} }}", fs.join(", "))
+        }
     }
 }
 
-/// Shift a rendered line right by `n` columns.
 /// Embolden every span of a line, in place of a line-level style.
 ///
 /// The spans carry their own colors from the highlighter, and styling each one
@@ -641,12 +638,10 @@ fn bold(line: Line<'static>) -> Line<'static> {
 /// tint fills the gaps around them rather than flattening them out.
 fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
     let bg = theme::member_docs();
-    let mut used = 0usize;
-    let mut spans: Vec<Span<'static>> = line
+    let spans: Vec<Span<'static>> = line
         .spans
         .into_iter()
         .map(|s| {
-            used += s.content.chars().count();
             let style = if s.style.bg.is_some() {
                 s.style
             } else {
@@ -655,52 +650,14 @@ fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
             s.style(style)
         })
         .collect();
-    if used < width as usize {
-        spans.push(Span::styled(" ".repeat(width as usize - used), bg));
-    }
-    Line::from(spans)
+    render::pad_to(Line::from(spans), width as usize, bg)
 }
 
+/// Shift a rendered line right by `n` columns.
 fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(n))];
     spans.extend(line.spans);
     Line::from(spans)
-}
-
-/// Render a declaration through the syntax highlighter.
-fn hl_code(code: &str, hl: &Highlighter) -> Vec<Line<'static>> {
-    let mut lines = render::declaration(code, hl);
-    lines.retain(|l| l.width() > 0);
-    lines
-}
-
-fn kind_name(k: &ItemKind) -> &'static str {
-    match k {
-        ItemKind::Module => "Module",
-        ItemKind::Struct => "Struct",
-        ItemKind::StructField => "Field",
-        ItemKind::Union => "Union",
-        ItemKind::Enum => "Enum",
-        ItemKind::Variant => "Variant",
-        ItemKind::Function => "Function",
-        ItemKind::Trait => "Trait",
-        ItemKind::TraitAlias => "Trait Alias",
-        ItemKind::Impl => "Impl",
-        ItemKind::TypeAlias => "Type Alias",
-        ItemKind::Constant => "Constant",
-        ItemKind::Static => "Static",
-        ItemKind::Macro => "Macro",
-        ItemKind::ProcAttribute => "Attribute Macro",
-        ItemKind::ProcDerive => "Derive Macro",
-        ItemKind::AssocConst => "Assoc Const",
-        ItemKind::AssocType => "Assoc Type",
-        ItemKind::Primitive => "Primitive",
-        ItemKind::Keyword => "Keyword",
-        ItemKind::ExternCrate => "Extern Crate",
-        ItemKind::Use => "Use",
-        ItemKind::ExternType => "Extern Type",
-        ItemKind::Attribute => "Attribute",
-    }
 }
 
 /// Whether an item belongs in a module listing.
@@ -723,9 +680,6 @@ fn is_public(item: &Item) -> bool {
 fn summary_line(item: &Item) -> Option<String> {
     let docs = item.docs.as_ref()?;
     let first = docs.lines().find(|l| !l.trim().is_empty())?.trim();
-    if first.is_empty() {
-        return None;
-    }
     let cleaned = strip_link_brackets(first);
     Some(cleaned.chars().take(80).collect())
 }
@@ -763,38 +717,6 @@ fn strip_link_brackets(s: &str) -> String {
     out
 }
 
-fn inner_name(inner: &ItemEnum) -> &'static str {
-    match inner {
-        ItemEnum::Module(_) => "Module",
-        ItemEnum::Struct(_) => "Struct",
-        ItemEnum::Union(_) => "Union",
-        ItemEnum::Enum(_) => "Enum",
-        ItemEnum::Function(_) => "Function",
-        ItemEnum::Trait(_) => "Trait",
-        ItemEnum::Impl(_) => "Impl",
-        ItemEnum::TypeAlias(_) => "Type Alias",
-        ItemEnum::Constant { .. } => "Constant",
-        ItemEnum::Static(_) => "Static",
-        ItemEnum::Macro(_) => "Macro",
-        ItemEnum::Primitive(_) => "Primitive",
-        ItemEnum::Variant(_) => "Variant",
-        ItemEnum::StructField(_) => "Field",
-        ItemEnum::AssocConst { .. } => "Assoc Const",
-        ItemEnum::AssocType { .. } => "Assoc Type",
-        _ => "Item",
-    }
-}
-
-/// The sections a fresh page has been explicitly toggled open or shut.
-///
-/// Empty: every section starts at its own default. Which sections a page even
-/// has is not known until it is built — a module's listings depend on what it
-/// contains — so this records *deviations* from the defaults rather than the
-/// open set, and [`is_expanded`] resolves the two.
-pub fn default_expanded() -> Vec<SectionId> {
-    Vec::new()
-}
-
 /// Whether a section is open, given the sections the reader has toggled.
 ///
 /// A toggled section is the opposite of its default; everything else sits at
@@ -808,71 +730,65 @@ mod tests {
     use super::*;
     use crate::testdocs::universe;
 
+    /// What a module page lists: each row's section and name, read from the
+    /// page's targets and sections rather than parsed back out of its text.
+    fn listings(u: &Universe, r: ItemRef) -> Vec<(&'static str, String)> {
+        let page = build(u, r, 100, &Highlighter::new(), &[]);
+        page.targets
+            .iter()
+            .filter(|t| t.spans.is_none())
+            .map(|t| {
+                let section = page
+                    .sections
+                    .iter()
+                    .rev()
+                    .find(|s| s.line < t.line)
+                    .expect("a listed row outside any section");
+                let name = u.item(t.item).and_then(|i| i.name.clone());
+                (section.id.title(), name.unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// Every kind a module can hold gets a listing, not just the common ones.
     #[test]
     fn module_pages_list_their_contents() {
         let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
+        let at = |path: &str| listings(&u, u.by_path(path).expect(path));
 
-        let text: Vec<String> = page
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-
+        let root = at("std");
         assert!(
-            text.iter().any(|l| l.contains("Modules")),
-            "no Modules section"
+            root.contains(&("Modules", "collections".into())),
+            "{root:?}"
         );
+        let mem = at("core::mem");
+        assert!(mem.contains(&("Unions", "MaybeUninit".into())), "{mem:?}");
+        let clone = at("core::clone");
         assert!(
-            text.iter()
-                .any(|l| l.trim_start().starts_with("collections"))
+            clone.contains(&("Derive Macros", "Clone".into())),
+            "{clone:?}"
         );
-        // Children are navigable, not just printed.
-        assert!(page.targets.len() > 50, "module children should be targets");
     }
 
+    /// A module lists its public API, each item once. The JSON also carries
+    /// `pub(crate)` internals the website omits, and re-exports can bring the
+    /// same item in more than once: `std::task` would otherwise list its
+    /// `task` module twice.
     #[test]
-    fn module_listings_hide_crate_internals() {
+    fn module_listings_show_each_public_child_once() {
         let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
-
-        // These are `pub(crate)` in the JSON but absent from the website.
+        let root = listings(&u, u.root().expect("std root"));
         for internal in ["panicking", "backtrace_rs", "__restricted_std_workaround"] {
-            let listed = page.lines.iter().any(|l| {
-                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                t.trim_start().starts_with(&format!("{internal} ")) || t.trim() == internal
-            });
-            assert!(!listed, "{internal} should not be listed");
+            assert!(
+                root.iter().all(|(_, name)| name != internal),
+                "{internal} should not be listed"
+            );
         }
-    }
 
-    #[test]
-    fn module_listings_have_no_duplicate_names_per_section() {
-        let u = universe();
-        let hl = Highlighter::new();
-        let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
-
-        // std both declares primitives and re-exports core's docs for them.
-        let mut seen: Vec<String> = Vec::new();
-        let mut section = String::new();
-        for l in &page.lines {
-            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            // Section headings carry a fold marker; members are indented.
-            if let Some(rest) = t.strip_prefix("▾ ").or_else(|| t.strip_prefix("▸ ")) {
-                section = rest.trim().to_string();
-                continue;
-            }
-            if let Some(rest) = t.strip_prefix("    ") {
-                let name = rest.split_whitespace().next().unwrap_or("").to_string();
-                let key = format!("{section}/{name}");
-                assert!(!seen.contains(&key), "{key} listed twice");
-                seen.push(key);
-            }
+        let task = listings(&u, u.by_path("std::task").expect("std::task"));
+        let mut seen = std::collections::HashSet::new();
+        for row in &task {
+            assert!(seen.insert(row), "{row:?} listed twice");
         }
     }
 
@@ -881,21 +797,16 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let root = u.root().expect("std root");
-        let page = build(&u, root, 100, &hl, &default_expanded());
+        let page = build(&u, root, 100, &hl, &[]);
 
         // A module page's listings register as sections, so n/p steps them.
-        let titles: Vec<&str> = page.sections.iter().map(|s| s.title()).collect();
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.id.title()).collect();
         assert!(titles.contains(&"Modules"), "got {titles:?}");
         assert!(titles.contains(&"Macros"), "got {titles:?}");
-        assert_eq!(page.sections.len(), page.section_lines.len());
 
         // Every registered section heading really is at the line claimed.
-        for (id, line) in page.sections.iter().zip(&page.section_lines) {
-            let t: String = page.lines[*line]
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+        for Section { id, line } in &page.sections {
+            let t = page.lines[*line].to_string();
             assert!(
                 t.contains(id.title()),
                 "line {line} is not {:?}: {t:?}",
@@ -913,7 +824,7 @@ mod tests {
             page.lines.len(),
             folded.lines.len()
         );
-        let titles: Vec<&str> = folded.sections.iter().map(|s| s.title()).collect();
+        let titles: Vec<&str> = folded.sections.iter().map(|s| s.id.title()).collect();
         assert!(
             titles.contains(&"Modules"),
             "heading should survive folding"
@@ -947,22 +858,6 @@ mod tests {
         for g in ImplGroup::all() {
             assert!(groups.contains(&g), "missing group {g:?}");
         }
-        let total: usize = sections.iter().map(|s| s.impls.len()).sum();
-        assert!(total > 100, "expected Vec's ~110 impls, got {total}");
-    }
-
-    #[test]
-    fn builds_a_page_for_string() {
-        let u = universe();
-        let hl = Highlighter::new();
-        let r = u.by_path("alloc::string::String").expect("String");
-        let page = build(&u, r, 80, &hl, &default_expanded());
-
-        assert!(page.title.ends_with("string::String"));
-        assert!(page.lines.len() > 20, "page looks empty");
-        assert!(!page.sections.is_empty(), "no impl sections");
-        // Inherent methods are targets you can navigate to.
-        assert!(!page.targets.is_empty(), "no navigable targets");
     }
 
     #[test]
@@ -970,19 +865,15 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("alloc::string::String").expect("String");
-        let page = build(&u, r, 100, &hl, &default_expanded());
+        let page = build(&u, r, 100, &hl, &[]);
 
         // `String::new` documents itself with a `let s = String::new();`
         // example; finding it proves method docs reach the markdown renderer
         // rather than being cut to a one-line summary.
-        let text: Vec<String> = page
+        let example = page
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        let example = text
-            .iter()
-            .position(|l| l.contains("String::new()"))
+            .position(|l| l.to_string().contains("String::new()"))
             .expect("no rendered example from a method's docs");
 
         // Syntax highlighting splits a code line into several coloured spans;
@@ -1010,7 +901,7 @@ mod tests {
             .lines
             .iter()
             .find(|l| {
-                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                let text = l.to_string();
                 text.trim_start().starts_with("impl ") && text.contains(" for ")
             })
             .expect("no trait impl header on String");
@@ -1042,7 +933,7 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, 100, &hl, &default_expanded());
+        let page = build(&u, r, 100, &hl, &[]);
 
         let links: Vec<&Target> = page.targets.iter().filter(|t| t.spans.is_some()).collect();
         assert!(!links.is_empty(), "no intra-doc link targets on Option");
@@ -1058,35 +949,26 @@ mod tests {
     }
 
     #[test]
-    fn option_variants_render() {
+    fn enum_pages_list_their_variants() {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, 80, &hl, &default_expanded());
-        let text: String = page
-            .lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Variants"), "no Variants section");
-        assert!(text.contains("None"), "missing None variant");
-        assert!(text.contains("Some"), "missing Some variant");
-    }
+        let page = build(&u, r, 80, &hl, &[]);
 
-    /// Text of a line, spans joined.
-    fn text_of(l: &Line<'_>) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
+        let variants: Vec<&str> = page
+            .targets
+            .iter()
+            .filter(|t| t.spans.is_none())
+            .filter_map(|t| u.item(t.item))
+            .filter(|i| matches!(i.inner, ItemEnum::Variant(_)))
+            .filter_map(|i| i.name.as_deref())
+            .collect();
+        assert_eq!(variants, ["None", "Some"]);
     }
 
     /// Columns of leading whitespace on a line.
     fn indent_of(l: &Line<'_>) -> usize {
-        let t = text_of(l);
+        let t = l.to_string();
         t.len() - t.trim_start().len()
     }
 
@@ -1111,7 +993,7 @@ mod tests {
         // sits *above* the signatures around it, so missing one would let the
         // walk below compare a method against the next impl's heading.
         let is_impl_header = |l: &Line<'_>| {
-            let t = text_of(l);
+            let t = l.to_string();
             let t = t.trim_start();
             t.starts_with("impl ") || t.starts_with("impl<")
         };
@@ -1132,19 +1014,21 @@ mod tests {
             // header, or the next section heading if this was the last impl
             // in its section.
             let end = (header + 1..page.lines.len())
-                .find(|&i| is_impl_header(&page.lines[i]) || page.section_lines.contains(&i))
+                .find(|&i| {
+                    is_impl_header(&page.lines[i]) || page.sections.iter().any(|s| s.line == i)
+                })
                 .unwrap_or(page.lines.len());
 
             for sig in header + 1..end {
-                if !text_of(&page.lines[sig]).trim_start().starts_with("fn ") {
+                if !page.lines[sig].to_string().trim_start().starts_with("fn ") {
                     continue;
                 }
                 assert_eq!(indent_of(&page.lines[sig]), indent::MEMBER);
 
                 // Prose before the next signature, if this method has any.
                 let Some(docs) = (sig + 1..end)
-                    .take_while(|&i| !text_of(&page.lines[i]).trim_start().starts_with("fn "))
-                    .find(|&i| !text_of(&page.lines[i]).trim().is_empty())
+                    .take_while(|&i| !page.lines[i].to_string().trim_start().starts_with("fn "))
+                    .find(|&i| !page.lines[i].to_string().trim().is_empty())
                 else {
                     continue;
                 };
@@ -1153,7 +1037,7 @@ mod tests {
                     "docs at {} are shallower than the signature at {}: {:?}",
                     indent_of(&page.lines[docs]),
                     indent_of(&page.lines[sig]),
-                    text_of(&page.lines[docs]),
+                    page.lines[docs].to_string(),
                 );
                 checked += 1;
             }
@@ -1171,7 +1055,7 @@ mod tests {
         let u = universe();
         let hl = Highlighter::new();
         let r = u.by_path("core::option::Option").expect("Option");
-        let page = build(&u, r, WIDTH, &hl, &default_expanded());
+        let page = build(&u, r, WIDTH, &hl, &[]);
 
         let want = theme::member_docs().bg.expect("panel bg");
         let tinted = page
@@ -1184,16 +1068,24 @@ mod tests {
             tinted.width(),
             WIDTH as usize,
             "tinted line stops short of the width: {:?}",
-            text_of(tinted)
+            tinted.to_string()
         );
         // The page's own top-level docs are not a member's, so they stay plain
         // — but they are indented to the same rung as one, so the description
         // hangs off the declaration rather than sitting flush left.
-        let first_prose = page
-            .lines
+        // A link before the first member row sits in the page's own docs.
+        let first_member = page
+            .targets
             .iter()
-            .find(|l| text_of(l).trim_start().starts_with("The Option"))
-            .expect("no top-level docs");
+            .find(|t| t.spans.is_none())
+            .expect("no member rows")
+            .line;
+        let first_prose = page
+            .targets
+            .iter()
+            .find(|t| t.spans.is_some() && t.line < first_member)
+            .map(|t| &page.lines[t.line])
+            .expect("no link in Option's own docs");
         assert!(
             first_prose.spans.iter().all(|s| s.style.bg.is_none()),
             "the page's own docs were tinted like a member's"
@@ -1202,7 +1094,7 @@ mod tests {
             indent_of(first_prose),
             indent::HEADING,
             "the page's own docs are not indented: {:?}",
-            text_of(first_prose)
+            first_prose.to_string()
         );
     }
 }

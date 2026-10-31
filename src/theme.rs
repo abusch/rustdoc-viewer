@@ -20,8 +20,23 @@ use ratatui::style::{Modifier, Style};
 ///
 /// Opaline identifies builtins by kebab-case id, not by the underscored name
 /// of the arborium function that produces the matching syntax theme.
-// pub const DEFAULT_THEME: &str = "catppuccin-mocha";
-pub const DEFAULT_THEME: &str = "catppuccin-latte";
+// pub const DEFAULT_THEME: &str = "catppuccin-latte";
+pub const DEFAULT_THEME: &str = "catppuccin-mocha";
+
+/// The syntax-highlighting theme matching [`DEFAULT_THEME`], so code and
+/// chrome always come from the same palette.
+///
+/// Arborium names its themes for display ("Catppuccin Latte") where opaline
+/// uses kebab-case ids, so the id is derived from the name rather than kept as
+/// a second setting that could drift. Falls back to Catppuccin Mocha, the
+/// default of both, when arborium has no theme by that id.
+pub fn syntax() -> arborium_theme::Theme {
+    let builtin = arborium_theme::builtin::all();
+    builtin
+        .into_iter()
+        .find(|t| t.name.to_lowercase().replace(' ', "-") == DEFAULT_THEME)
+        .unwrap_or_else(arborium_theme::builtin::catppuccin_mocha)
+}
 
 /// Install the default theme as the process-wide active theme.
 ///
@@ -80,13 +95,16 @@ pub fn muted() -> Style {
     style(styles::MUTED)
 }
 
-/// A deprecation notice.
+/// A deprecation notice: the warning colour, in bold, so it stands out from
+/// [`unstable`].
 pub fn deprecated() -> Style {
-    style(styles::WARNING_STYLE)
+    style(styles::WARNING_STYLE).add_modifier(Modifier::BOLD)
 }
 
 /// An unstable-feature notice: a caveat rather than a defect, so it reads a
-/// step softer than [`deprecated`].
+/// step softer than [`deprecated`] — the same colour, without the weight.
+/// Nightly docs mark a good share of items unstable, so this is also the one
+/// that must not shout.
 pub fn unstable() -> Style {
     style(styles::WARNING_STYLE)
 }
@@ -114,6 +132,12 @@ pub fn inline_code() -> Style {
 /// An intra-doc link.
 pub fn link() -> Style {
     fg(tokens::INFO).add_modifier(Modifier::UNDERLINED)
+}
+
+/// A horizontal rule (`---`) between passages of docs: a divider, drawn like
+/// the border of a panel that does not have focus.
+pub fn rule() -> Style {
+    fg(tokens::BORDER_UNFOCUSED)
 }
 
 /// A block quote.
@@ -218,6 +242,14 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
 
+    /// A deprecation is a defect and an unstable feature only a caveat; once
+    /// both notices were the same style, which said they mattered equally.
+    #[test]
+    fn deprecation_outweighs_instability() {
+        init();
+        assert_ne!(deprecated(), unstable());
+    }
+
     /// The named theme must actually exist: a typo here would silently leave
     /// opaline's default theme in place.
     #[test]
@@ -228,12 +260,20 @@ mod tests {
         );
     }
 
+    /// The syntax theme is found by name, not just defaulted: a mismatch
+    /// would highlight code in one palette and draw everything else in another.
+    #[test]
+    fn the_syntax_theme_matches_the_default_theme() {
+        let name = syntax().name.to_lowercase().replace(' ', "-");
+        assert_eq!(name, DEFAULT_THEME);
+    }
+
     /// Every style this module exposes must resolve to a real color rather than
     /// falling back to a default, which is how a mistyped token name shows up.
     #[test]
     fn every_style_resolves_against_the_theme() {
         init();
-        let styles: [(&str, Style); 19] = [
+        let styles = [
             ("title", title()),
             ("section", section()),
             ("signature", signature()),
@@ -245,6 +285,10 @@ mod tests {
             ("inline_code", inline_code()),
             ("link", link()),
             ("quote", quote()),
+            ("rule", rule()),
+            ("code_block", code_block()),
+            ("page", page()),
+            ("member_docs", member_docs()),
             ("accent", accent()),
             ("focused_border", focused_border()),
             ("unfocused_border", unfocused_border()),
@@ -252,7 +296,9 @@ mod tests {
             ("selected_name", selected_name()),
             ("unselected_name", unselected_name()),
             ("selected_row", selected_row()),
+            ("focused_link", focused_link()),
             ("cursor_line", cursor_line()),
+            ("status_bar", status_bar()),
         ];
 
         for (name, style) in styles {

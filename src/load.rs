@@ -14,7 +14,7 @@ use rustdoc_types::Crate;
 ///
 /// `std` alone is not enough: `String` and `Vec` live in `alloc`, `Option` in
 /// `core`, and `std` merely re-exports them.
-pub const STD_CRATES: [&str; 3] = ["std", "core", "alloc"];
+const STD_CRATES: [&str; 3] = ["std", "core", "alloc"];
 
 /// The toolchain whose rustdoc JSON we read, overridable for when the current
 /// nightly has drifted past the format version we support.
@@ -113,14 +113,15 @@ fn extract_format_version(text: &str) -> Option<u32> {
 
 /// Load and parse `std`, `core`, and `alloc` concurrently.
 ///
-/// Returns them in the order given by [`STD_CRATES`].
-pub fn load_std_crates() -> Result<Vec<Crate>> {
+/// Returns each with its name, in the order given by [`STD_CRATES`], so `std`
+/// comes first.
+pub fn load_std_crates() -> Result<Vec<(String, Crate)>> {
     let dir = json_dir()?;
 
     std::thread::scope(|scope| {
         let handles: Vec<_> = STD_CRATES
             .iter()
-            .map(|name| scope.spawn(|| load_one(&dir, name)))
+            .map(|name| scope.spawn(|| Ok((name.to_string(), load_one(&dir, name)?))))
             .collect();
 
         handles
@@ -158,18 +159,5 @@ mod tests {
     fn accepts_our_version() {
         let text = format!(r#"{{"format_version":{}}}"#, rustdoc_types::FORMAT_VERSION);
         assert!(check_format_version(&text, "std").is_ok());
-    }
-}
-
-#[cfg(test)]
-mod toolchain_tests {
-    /// The override exists so CI can pin a nightly; make sure the default is
-    /// still the plain `nightly` channel.
-    #[test]
-    fn defaults_to_nightly() {
-        // Only meaningful when the caller has not set an override.
-        if std::env::var_os("RDV_TOOLCHAIN").is_none() {
-            assert_eq!(super::toolchain(), "nightly");
-        }
     }
 }

@@ -82,6 +82,8 @@ Data flows in one direction: `load` → `docs` → `index` → `page` → `ui`.
   and owns all cross-crate identity. Items are addressed by `ItemRef`
   (crate + id), never by bare `Id`, because ids are only meaningful within their
   crate; `resolve` translates a foreign id through its canonical path.
+- **`kind.rs`** names each `ItemKind` (page label, search badge) and says what
+  it can hold; add a kind's spelling there rather than matching on it locally.
 - **`index.rs`** — `SearchIndex` is the flat fuzzy-searchable view (frizbee).
 - **`page.rs`** builds a `Page`: styled lines plus `Target`s and foldable sections.
 - **`render.rs`** turns rustdoc markdown into styled lines and syntax-highlights
@@ -93,10 +95,14 @@ Data flows in one direction: `load` → `docs` → `index` → `page` → `ui`.
 ### Three ideas worth knowing before editing
 
 **Display paths vs. canonical paths.** `Vec` really lives at `alloc::vec::Vec`
-but must be *shown* as `std::vec::Vec`. `main` builds the index, then calls
-`universe.set_display_paths(index.display_paths())` to install the reader-facing
-spelling. Both spellings exist for most items, and lookups often have to try each
-— `by_path` is keyed canonically, so a display path will not resolve against it.
+but must be *shown* as `std::vec::Vec`. `Universe::new` derives the reader-facing
+spelling the way rustdoc's HTML inlining does: it walks each crate's public
+namespace (`std` first, so its spelling wins), following re-exports (named and
+glob) across crates and skipping `#[doc(no_inline)]` ones, which the website
+renders as links rather than pages. Anything not reachable that way — a method,
+an internal — is spelled through its nearest ancestor that is. `path_of` returns it.
+Both spellings exist for most items, and lookups often have to try each —
+`by_path` is keyed canonically, so a display path will not resolve against it.
 
 **Not every item is in `paths`.** Trait-impl members (`String`'s `clone`) are
 absent from rustdoc's `paths` map entirely: no path, no kind, so `kind_of`,
@@ -128,13 +134,14 @@ until its section is opened.
 All styling goes through `theme.rs`, which resolves opaline's semantic tokens
 (`accent.primary`, `text.dim`, `bg.highlight`) and named styles (`dimmed`,
 `inline_code`, `focused_border`). **Do not write `Color::*` literals in UI code**
-— add a named style to `theme.rs` instead. Both opaline and arborium default to
-Catppuccin Mocha.
+— add a named style to `theme.rs` instead.
 
-Opaline identifies builtin themes by *kebab*-case id (`catppuccin-mocha`), while
-arborium's function is `catppuccin_mocha()`. Getting the id wrong falls back to
-opaline's default silently — everything still renders, just in the wrong colors,
-which is why `theme.rs` has a test asserting the named theme loads.
+`theme::DEFAULT_THEME` is the one setting: an opaline *kebab*-case id
+(`catppuccin-mocha`). The syntax theme is derived from it — `theme::syntax`
+finds the arborium theme whose display name ("Catppuccin Mocha") kebab-cases to
+that id — so switching themes is a one-line change. Getting the id wrong falls
+back silently — everything still renders, just in the wrong colors — which is
+why `theme.rs` tests that both the opaline and the arborium theme are found.
 
 Themes load at runtime, so styles are functions, not `const`s.
 

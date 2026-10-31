@@ -1,63 +1,35 @@
 //! Rendering rustdoc's type and signature structures back into Rust syntax.
 
 use rustdoc_types::{
-    Abi, FunctionSignature, GenericArg, GenericArgs, GenericBound, GenericParamDef,
-    GenericParamDefKind, Generics, Item, ItemEnum, PreciseCapturingArg, Term, TraitBoundModifier,
-    Type, WherePredicate,
+    Abi, Enum, FunctionSignature, GenericArg, GenericArgs, GenericBound, GenericParamDef,
+    GenericParamDefKind, Generics, Item, ItemEnum, MacroKind, Path, PreciseCapturingArg, Struct,
+    Term, TraitBoundModifier, Type, Union, WherePredicate,
 };
 
 /// Format a type as Rust source.
 pub fn ty(t: &Type) -> String {
     match t {
-        Type::ResolvedPath(p) => {
-            let mut s = p.path.clone();
-            if let Some(args) = &p.args {
-                s.push_str(&generic_args(args));
-            }
-            s
-        }
+        Type::ResolvedPath(p) => path(p),
         Type::Generic(g) => g.clone(),
         Type::Primitive(p) => p.clone(),
         Type::DynTrait(d) => {
             let mut parts: Vec<String> = d
                 .traits
                 .iter()
-                .map(|pt| {
-                    let mut s = String::new();
-                    if !pt.generic_params.is_empty() {
-                        s.push_str(&hrtb(&pt.generic_params));
-                    }
-                    s.push_str(&pt.trait_.path);
-                    if let Some(a) = &pt.trait_.args {
-                        s.push_str(&generic_args(a));
-                    }
-                    s
-                })
+                .map(|pt| format!("{}{}", hrtb(&pt.generic_params), path(&pt.trait_)))
                 .collect();
             if let Some(lt) = &d.lifetime {
                 parts.push(lt.clone());
             }
             format!("dyn {}", parts.join(" + "))
         }
-        Type::FunctionPointer(f) => {
-            let mut s = String::new();
-            if !f.generic_params.is_empty() {
-                s.push_str(&hrtb(&f.generic_params));
-            }
-            s.push_str(&header_prefix(
-                f.header.is_unsafe,
-                false,
-                false,
-                &f.header.abi,
-            ));
-            s.push_str("fn");
-            s.push_str(&fn_params(&f.sig, false));
-            if let Some(out) = &f.sig.output {
-                s.push_str(" -> ");
-                s.push_str(&ty(out));
-            }
-            s
-        }
+        Type::FunctionPointer(f) => format!(
+            "{}{}fn{}{}",
+            hrtb(&f.generic_params),
+            header_prefix(f.header.is_unsafe, false, false, &f.header.abi),
+            pointer_params(&f.sig),
+            returns(&f.sig.output),
+        ),
         Type::Tuple(items) => {
             let inner: Vec<String> = items.iter().map(ty).collect();
             // A 1-tuple needs the trailing comma to stay a tuple.
@@ -86,18 +58,7 @@ pub fn ty(t: &Type) -> String {
             lifetime,
             is_mutable,
             type_,
-        } => {
-            let mut s = String::from("&");
-            if let Some(lt) = lifetime {
-                s.push_str(lt);
-                s.push(' ');
-            }
-            if *is_mutable {
-                s.push_str("mut ");
-            }
-            s.push_str(&ty(type_));
-            s
-        }
+        } => format!("{}{}", reference(lifetime, *is_mutable), ty(type_)),
         Type::QualifiedPath {
             name,
             args,
@@ -119,10 +80,42 @@ pub fn ty(t: &Type) -> String {
     }
 }
 
-/// `for<'a, 'b> ` prefix used by HRTBs.
+/// The `for<'a, 'b> ` prefix of a higher-ranked bound, or empty when there
+/// is nothing to bind.
 fn hrtb(params: &[GenericParamDef]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
     let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
     format!("for<{}> ", names.join(", "))
+}
+
+/// A path with its generic arguments: `Iterator<Item = u8>`.
+fn path(p: &Path) -> String {
+    let args = p.args.as_deref().map(generic_args).unwrap_or_default();
+    format!("{}{args}", p.path)
+}
+
+/// The `&'a mut ` that opens a reference, shared by reference types and
+/// `&self` receivers.
+fn reference(lifetime: &Option<String>, is_mutable: bool) -> String {
+    let mut s = String::from("&");
+    if let Some(lt) = lifetime {
+        s.push_str(lt);
+        s.push(' ');
+    }
+    if is_mutable {
+        s.push_str("mut ");
+    }
+    s
+}
+
+/// The ` -> T` of a signature, or empty for one returning `()`.
+fn returns(output: &Option<Type>) -> String {
+    output
+        .as_ref()
+        .map(|t| format!(" -> {}", ty(t)))
+        .unwrap_or_default()
 }
 
 fn header_prefix(is_unsafe: bool, is_const: bool, is_async: bool, abi: &Abi) -> String {
@@ -178,12 +171,7 @@ pub fn generic_args(args: &GenericArgs) -> String {
         }
         GenericArgs::Parenthesized { inputs, output } => {
             let ins: Vec<String> = inputs.iter().map(ty).collect();
-            let mut s = format!("({})", ins.join(", "));
-            if let Some(o) = output {
-                s.push_str(" -> ");
-                s.push_str(&ty(o));
-            }
-            s
+            format!("({}){}", ins.join(", "), returns(output))
         }
         GenericArgs::ReturnTypeNotation => "(..)".to_string(),
     }
@@ -217,20 +205,12 @@ fn bound(b: &GenericBound) -> String {
             generic_params,
             modifier,
         } => {
-            let mut s = String::new();
-            if !generic_params.is_empty() {
-                s.push_str(&hrtb(generic_params));
-            }
-            match modifier {
-                TraitBoundModifier::None => {}
-                TraitBoundModifier::Maybe => s.push('?'),
-                TraitBoundModifier::MaybeConst => s.push_str("~const "),
-            }
-            s.push_str(&trait_.path);
-            if let Some(a) = &trait_.args {
-                s.push_str(&generic_args(a));
-            }
-            s
+            let modifier = match modifier {
+                TraitBoundModifier::None => "",
+                TraitBoundModifier::Maybe => "?",
+                TraitBoundModifier::MaybeConst => "~const ",
+            };
+            format!("{}{modifier}{}", hrtb(generic_params), path(trait_))
         }
         GenericBound::Outlives(lt) => lt.clone(),
         GenericBound::Use(args) => {
@@ -310,16 +290,12 @@ pub fn where_clause(g: &Generics) -> String {
                 type_,
                 bounds,
                 generic_params,
-            } => {
-                let mut s = String::new();
-                if !generic_params.is_empty() {
-                    s.push_str(&hrtb(generic_params));
-                }
-                s.push_str(&ty(type_));
-                s.push_str(": ");
-                s.push_str(&bound_list(bounds));
-                s
-            }
+            } => format!(
+                "{}{}: {}",
+                hrtb(generic_params),
+                ty(type_),
+                bound_list(bounds)
+            ),
             WherePredicate::LifetimePredicate { lifetime, outlives } => {
                 format!("{}: {}", lifetime, outlives.join(" + "))
             }
@@ -335,22 +311,28 @@ pub fn where_clause(g: &Generics) -> String {
     }
 }
 
-/// Parameter list, rendering a leading receiver as `&self` / `self` etc.
-fn fn_params(sig: &FunctionSignature, allow_self: bool) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for (i, (name, t)) in sig.inputs.iter().enumerate() {
-        if allow_self && i == 0 && name == "self" {
-            parts.push(self_param(t));
-            continue;
-        }
-        if allow_self {
-            parts.push(format!("{name}: {}", ty(t)));
+/// A declared function's parameter list, rendering a leading receiver the way
+/// it is written: `(&mut self, n: usize)`.
+fn fn_params(sig: &FunctionSignature) -> String {
+    let params = sig.inputs.iter().enumerate().map(|(i, (name, t))| {
+        if i == 0 && name == "self" {
+            self_param(t)
         } else {
-            // Function pointers name their params, but the type reads better bare.
-            parts.push(ty(t));
+            format!("{name}: {}", ty(t))
         }
-    }
-    if sig.is_c_variadic {
+    });
+    param_list(params, sig.is_c_variadic)
+}
+
+/// A function pointer's parameter list. Pointers can name their parameters,
+/// but the types read better bare: `fn(usize) -> bool`.
+fn pointer_params(sig: &FunctionSignature) -> String {
+    param_list(sig.inputs.iter().map(|(_, t)| ty(t)), sig.is_c_variadic)
+}
+
+fn param_list(params: impl Iterator<Item = String>, is_c_variadic: bool) -> String {
+    let mut parts: Vec<String> = params.collect();
+    if is_c_variadic {
         parts.push("...".to_string());
     }
     format!("({})", parts.join(", "))
@@ -365,18 +347,7 @@ fn self_param(t: &Type) -> String {
             is_mutable,
             type_,
         } => match type_.as_ref() {
-            Type::Generic(g) if g == "Self" => {
-                let mut s = String::from("&");
-                if let Some(lt) = lifetime {
-                    s.push_str(lt);
-                    s.push(' ');
-                }
-                if *is_mutable {
-                    s.push_str("mut ");
-                }
-                s.push_str("self");
-                s
-            }
+            Type::Generic(g) if g == "Self" => format!("{}self", reference(lifetime, *is_mutable)),
             _ => format!("self: {}", ty(t)),
         },
         _ => format!("self: {}", ty(t)),
@@ -397,29 +368,14 @@ pub fn signature(item: &Item) -> Option<String> {
             s.push_str("fn ");
             s.push_str(name);
             s.push_str(&generic_params(&f.generics));
-            s.push_str(&fn_params(&f.sig, true));
-            if let Some(out) = &f.sig.output {
-                s.push_str(" -> ");
-                s.push_str(&ty(out));
-            }
+            s.push_str(&fn_params(&f.sig));
+            s.push_str(&returns(&f.sig.output));
             s.push_str(&where_clause(&f.generics));
             Some(s)
         }
-        ItemEnum::Struct(st) => {
-            let mut s = format!("struct {name}{}", generic_params(&st.generics));
-            s.push_str(&where_clause(&st.generics));
-            Some(s)
-        }
-        ItemEnum::Enum(e) => {
-            let mut s = format!("enum {name}{}", generic_params(&e.generics));
-            s.push_str(&where_clause(&e.generics));
-            Some(s)
-        }
-        ItemEnum::Union(u) => Some(format!(
-            "union {name}{}{}",
-            generic_params(&u.generics),
-            where_clause(&u.generics)
-        )),
+        ItemEnum::Struct(Struct { generics, .. }) => Some(type_decl("struct", name, generics)),
+        ItemEnum::Enum(Enum { generics, .. }) => Some(type_decl("enum", name, generics)),
+        ItemEnum::Union(Union { generics, .. }) => Some(type_decl("union", name, generics)),
         ItemEnum::Trait(t) => {
             let mut s = String::new();
             if t.is_unsafe {
@@ -466,8 +422,24 @@ pub fn signature(item: &Item) -> Option<String> {
         ItemEnum::Primitive(_) => Some(format!("primitive {name}")),
         ItemEnum::Module(_) => Some(format!("mod {name}")),
         ItemEnum::Macro(def) => Some(def.clone()),
+        // Built-in macros have no source to quote, so show how one is invoked.
+        ItemEnum::ProcMacro(m) => Some(match m.kind {
+            MacroKind::Bang => format!("{name}!() {{ /* proc-macro */ }}"),
+            MacroKind::Attr => format!("#[{name}]"),
+            MacroKind::Derive => format!("#[derive({name})]"),
+        }),
         _ => None,
     }
+}
+
+/// A type's declaration line: `struct Vec<T, A: Allocator = Global>`. Its
+/// fields or variants are listed beneath, not spelled out here.
+fn type_decl(keyword: &str, name: &str, generics: &Generics) -> String {
+    format!(
+        "{keyword} {name}{}{}",
+        generic_params(generics),
+        where_clause(generics)
+    )
 }
 
 /// The header line for an impl block, e.g. `impl<T> Display for Vec<T>`.
@@ -479,10 +451,7 @@ pub fn impl_header(im: &rustdoc_types::Impl) -> String {
         if im.is_negative {
             s.push('!');
         }
-        s.push_str(&tr.path);
-        if let Some(a) = &tr.args {
-            s.push_str(&generic_args(a));
-        }
+        s.push_str(&path(tr));
         s.push_str(" for ");
     }
     s.push_str(&ty(&im.for_));
@@ -576,11 +545,6 @@ mod tests {
 
     #[test]
     fn drops_empty_where_predicates() {
-        use rustdoc_types::{GenericParamDef, GenericParamDefKind};
-        let _ = (GenericParamDef {
-            name: "T".into(),
-            kind: GenericParamDefKind::Lifetime { outlives: vec![] },
-        },);
         // Rustdoc emits `T:` with no bounds for const-trait desugaring; that
         // must not surface as a dangling `where T:`.
         let g = Generics {
@@ -608,6 +572,6 @@ mod tests {
             output: None,
             is_c_variadic: false,
         };
-        assert_eq!(fn_params(&sig, true), "(&self)");
+        assert_eq!(fn_params(&sig), "(&self)");
     }
 }

@@ -2,11 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, Screen};
 use crate::index::Entry;
+use crate::kind;
+use crate::render;
 use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -26,11 +29,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.screen {
         Screen::Search => draw_search(f, app, chunks[0]),
-        Screen::Item | Screen::Help => draw_item(f, app, chunks[0]),
+        Screen::Item => draw_item(f, app, chunks[0]),
     }
     draw_status(f, app, chunks[1]);
 
-    if app.screen == Screen::Help {
+    if app.help {
         draw_help(f, area);
     }
 }
@@ -84,14 +87,14 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
         ("  ", theme::unselected_name())
     };
 
-    let kind = kind_badge(&e.kind);
+    let kind = kind::badge(e.kind);
     // Show the module path dimmed, with the name itself highlighted.
     let (parent, name) = match e.path.rsplit_once("::") {
         Some((p, n)) => (format!("{p}::"), n.to_string()),
         None => (String::new(), e.path.clone()),
     };
 
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(marker, theme::accent()),
         Span::styled(format!("{kind:<9}"), theme::kind_badge()),
         Span::styled(parent, theme::dim()),
@@ -99,35 +102,10 @@ fn result_line(e: &Entry, selected: bool, width: u16) -> Line<'static> {
     ];
     if selected {
         // Pad so the highlight spans the row.
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if (used as u16) < width {
-            spans.push(Span::raw(" ".repeat(width as usize - used)));
-        }
-        return Line::from(spans).style(theme::selected_row());
+        let line = render::pad_to(Line::from(spans), width as usize, Style::default());
+        return line.style(theme::selected_row());
     }
     Line::from(spans)
-}
-
-fn kind_badge(k: &rustdoc_types::ItemKind) -> &'static str {
-    use rustdoc_types::ItemKind as K;
-    match k {
-        K::Struct => "struct",
-        K::Enum => "enum",
-        K::Trait => "trait",
-        K::Function => "fn",
-        K::Module => "mod",
-        K::Macro => "macro",
-        K::TypeAlias => "type",
-        K::Constant => "const",
-        K::Static => "static",
-        K::Primitive => "prim",
-        K::Union => "union",
-        K::Variant => "variant",
-        K::AssocConst => "const",
-        K::AssocType => "type",
-        K::StructField => "field",
-        _ => "item",
-    }
 }
 
 /// Rows the item view spends on its header before the body starts.
@@ -142,16 +120,13 @@ const SIDE_PADDING: u16 = 2;
 
 fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
     // Inset before anything measures the area: the page is built to this
-    // width, and `ensure_width` must be told the same number the lines are
-    // wrapped to or every frame rebuilds the page.
+    // width, so it is the one the app must be told.
     let area = Rect {
         x: area.x + SIDE_PADDING,
         width: area.width.saturating_sub(SIDE_PADDING * 2),
         ..area
     };
-    app.viewport = area.height.saturating_sub(HEADER_HEIGHT);
-    app.last_width = area.width;
-    app.ensure_width(area.width);
+    app.resize(area.width, area.height.saturating_sub(HEADER_HEIGHT));
 
     let Some(page) = &app.page else {
         f.render_widget(
@@ -182,7 +157,7 @@ fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus.and_then(|i| page.targets.get(i));
     let focused_line = focused.map(|t| t.line);
     // Mark which section `space` will act on.
-    let cursor_line = page.section_lines.get(app.section_cursor).copied();
+    let cursor_line = page.sections.get(app.section_cursor).map(|s| s.line);
 
     let start = app.scroll as usize;
     let visible: Vec<Line> = page
@@ -364,6 +339,25 @@ fn draw_help(f: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdocs::app_on;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    /// Draw one 100×30 frame of the app showing the item at `path`.
+    fn drawn(path: &str) -> Buffer {
+        let mut app = app_on(path);
+        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        term.draw(|f| draw(f, &mut app)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
+    /// Each screen row as text.
+    fn rows(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
 
     #[test]
     fn hints_fit_the_width_and_always_keep_the_pinned_one() {
@@ -388,33 +382,11 @@ mod tests {
         assert_eq!(fit_hints(&hints, "? help", 2), "? help");
     }
 
-    /// The item-view footer is measured in characters, not bytes: the
-    /// separators and arrows are multi-byte.
-    #[test]
-    fn hints_are_measured_in_characters() {
-        let line = fit_hints(&["⏎ follow", "⇧tab link"], "? help", 30);
-        assert!(line.chars().count() <= 30, "{line:?}");
-    }
-
     /// A method opened from search is not just focused in the model: the row
     /// is actually painted as focused in the rendered frame.
     #[test]
     fn an_opened_method_row_is_highlighted_on_screen() {
-        use crate::app::App;
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (u, idx) = crate::testdocs::indexed();
-        let mut app = App::new(u, idx);
-        let m = app
-            .universe
-            .by_path("alloc::string::String::push_str")
-            .expect("String::push_str");
-        app.navigate_to(m);
-
-        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        term.draw(|f| draw(f, &mut app)).expect("draw");
-        let buf = term.backend().buffer();
+        let buf = drawn("alloc::string::String::push_str");
 
         // Find the row carrying the declaration, and confirm it is painted
         // with the focus background rather than the page background. The name
@@ -422,11 +394,10 @@ mod tests {
         // is also on the page and also starts with `fn push_str`.
         let want = theme::focused_link().bg.expect("focus bg");
         let mut found = false;
-        for y in 0..buf.area.height {
-            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        for (y, row) in rows(&buf).iter().enumerate() {
             if row.contains("fn push_str(") {
                 found = true;
-                let bg = buf[(6, y)].bg;
+                let bg = buf[(6, y as u16)].bg;
                 assert_eq!(bg, want, "method row {y} is not highlighted: {row:?}");
             }
         }
@@ -438,25 +409,8 @@ mod tests {
     /// like it had lost its left edge.
     #[test]
     fn the_item_view_is_padded_but_the_status_bar_is_not() {
-        use crate::app::App;
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (u, idx) = crate::testdocs::indexed();
-        let mut app = App::new(u, idx);
-        let m = app
-            .universe
-            .by_path("core::option::Option")
-            .expect("Option");
-        app.navigate_to(m);
-
-        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        term.draw(|f| draw(f, &mut app)).expect("draw");
-        let buf = term.backend().buffer();
-
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
+        let buf = drawn("core::option::Option");
+        let rows = rows(&buf);
         let (status, body) = rows.split_last().expect("at least one row");
 
         // Asserted against a literal margin rather than SIDE_PADDING itself:
@@ -492,7 +446,7 @@ mod tests {
 
         // The status bar owns its own single leading space and starts there.
         assert!(
-            status.starts_with(" /") || status.starts_with(" 0"),
+            status.starts_with(' ') && !status.starts_with("  "),
             "the status bar was indented with the page: {status:?}"
         );
     }

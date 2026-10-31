@@ -4,6 +4,7 @@ mod app;
 mod docs;
 mod format;
 mod index;
+mod kind;
 mod load;
 mod page;
 mod render;
@@ -25,12 +26,8 @@ fn main() -> Result<()> {
     // Load before touching the terminal, so errors print normally.
     eprint!("loading rust documentation... ");
     let started = std::time::Instant::now();
-    let crates = load::load_std_crates()?;
-    let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-    let mut universe = docs::Universe::new(crates, names);
+    let universe = docs::Universe::new(load::load_std_crates()?);
     let index = index::SearchIndex::build(&universe);
-    // Show items under the name people searched for, not their defining crate.
-    universe.set_display_paths(index.display_paths());
     eprintln!(
         "{} items in {:.2}s",
         index.len(),
@@ -53,13 +50,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                app.status = None;
-                handle_key(app, key);
-            }
-            Event::Resize(_, _) => {}
-            _ => {}
+        // Anything else, a resize included, only needs the redraw at the top
+        // of the loop.
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            handle_key(app, key);
         }
         if app.should_quit {
             return Ok(());
@@ -68,13 +64,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // A status message answers the previous key; the next one dismisses it.
+    app.status = None;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // Help swallows every key except the ones that dismiss it.
-    if app.screen == Screen::Help {
-        match key.code {
-            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => app.close_help(),
-            _ => {}
+    if app.help {
+        if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
+            app.help = false;
         }
         return;
     }
@@ -86,7 +83,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         (KeyCode::Char('?'), _) if app.screen != Screen::Search => {
-            app.show_help();
+            app.help = true;
             return;
         }
         _ => {}
@@ -95,7 +92,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match app.screen {
         Screen::Search => search_key(app, key, ctrl),
         Screen::Item => item_key(app, key, ctrl),
-        Screen::Help => {}
     }
 }
 
@@ -104,7 +100,7 @@ fn search_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         (KeyCode::Esc, _) => {
             // Esc dismisses the search and returns to the page behind it.
             // Only `q` quits, so with no page to go back to it does nothing.
-            if app.has_page() {
+            if app.page.is_some() {
                 app.screen = Screen::Item;
             }
         }
@@ -158,7 +154,6 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         (KeyCode::Char('n'), false) => app.next_section(),
         (KeyCode::Char('p'), false) => app.prev_section(),
         (KeyCode::Char(' '), _) => app.toggle_section(),
-        (KeyCode::Char('?'), _) => app.show_help(),
         _ => {}
     }
 }
@@ -166,14 +161,9 @@ fn item_key(app: &mut App, key: KeyEvent, ctrl: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn app() -> App {
-        let (u, idx) = crate::testdocs::indexed();
-        App::new(u, idx)
-    }
+    use crate::testdocs::{app, app_on};
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-        app.status = None;
         handle_key(app, KeyEvent::new(code, modifiers));
     }
 
@@ -181,9 +171,7 @@ mod tests {
     /// to the parent item, the other scrolls half a page.
     #[test]
     fn u_goes_up_while_ctrl_u_scrolls() {
-        let mut a = app();
-        let vec_ref = a.universe.by_path("alloc::vec::Vec").expect("Vec");
-        a.navigate_to(vec_ref);
+        let mut a = app_on("alloc::vec::Vec");
 
         // ^u scrolls within the page, leaving the item alone.
         a.scroll_by(40);
@@ -217,9 +205,10 @@ mod tests {
 
         // Help: Esc closes the popup.
         press(&mut a, KeyCode::Char('?'), KeyModifiers::NONE);
-        assert_eq!(a.screen, Screen::Help);
+        assert!(a.help);
         press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!a.should_quit, "esc should not quit the help");
+        assert!(!a.help);
         assert_eq!(a.screen, Screen::Item);
 
         // q still quits.
@@ -227,32 +216,24 @@ mod tests {
         assert!(a.should_quit, "q should quit");
     }
 
-    /// n/p and space work on a module page's listings, not just on impls.
+    /// n/p step the section cursor and space toggles the section under it.
+    /// What folding does to the page is the page's and app's business; this
+    /// only checks the keys reach it. The landing page is std's root, so this
+    /// also covers module listings rather than just impls.
     #[test]
-    fn module_sections_step_and_fold() {
+    fn n_p_and_space_drive_the_section_cursor() {
         let mut a = app();
-        let root = a.universe.root().expect("std root");
-        a.navigate_to(root);
-        assert!(
-            !a.page.as_ref().unwrap().sections.is_empty(),
-            "std's root page should have sections"
-        );
+        let section = |a: &App| a.page.as_ref().unwrap().sections[a.section_cursor].id;
 
-        // n steps to the next section and scrolls it into view.
         press(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         assert_eq!(a.section_cursor, 1);
         press(&mut a, KeyCode::Char('p'), KeyModifiers::NONE);
         assert_eq!(a.section_cursor, 0);
 
-        // space folds the section under the cursor.
-        let before = a.page.as_ref().unwrap().lines.len();
         press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        let after = a.page.as_ref().unwrap().lines.len();
-        assert!(after < before, "space should fold ({before} -> {after})");
-
-        // ...and again unfolds it.
+        assert_eq!(a.toggled(), [section(&a)]);
         press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        assert_eq!(a.page.as_ref().unwrap().lines.len(), before);
+        assert!(a.toggled().is_empty());
     }
 
     /// On the search screen `u` is literal text, not a command.
