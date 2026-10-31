@@ -20,8 +20,8 @@ use ratatui::style::{Modifier, Style};
 ///
 /// Opaline identifies builtins by kebab-case id, not by the underscored name
 /// of the arborium function that produces the matching syntax theme.
-// pub const DEFAULT_THEME: &str = "catppuccin-mocha";
-pub const DEFAULT_THEME: &str = "catppuccin-latte";
+// pub const DEFAULT_THEME: &str = "catppuccin-latte";
+pub const DEFAULT_THEME: &str = "catppuccin-mocha";
 
 /// The syntax-highlighting theme matching [`DEFAULT_THEME`], so code and
 /// chrome always come from the same palette.
