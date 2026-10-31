@@ -1,11 +1,9 @@
 //! The flat, searchable index over the whole universe.
 
-use std::collections::HashMap;
-
 use frizbee::{CaseMatching, Config, Matcher};
-use rustdoc_types::{ItemEnum, ItemKind};
+use rustdoc_types::ItemKind;
 
-use crate::docs::{CrateId, ItemRef, Universe};
+use crate::docs::{ItemRef, Universe};
 
 /// One searchable entry: an item, and the path we show for it.
 pub struct Entry {
@@ -31,8 +29,6 @@ pub struct SearchIndex {
 
 impl SearchIndex {
     pub fn build(universe: &Universe) -> Self {
-        let aliases = std_aliases(universe);
-
         let mut entries: Vec<Entry> = Vec::new();
         for cid in universe.crate_ids() {
             let krate = universe.krate(cid);
@@ -42,22 +38,15 @@ impl SearchIndex {
                 if summary.crate_id != 0 {
                     continue;
                 }
-                let canonical = summary.path.join("::");
                 let Some(name) = summary.path.last().cloned() else {
                     continue;
                 };
-                // Prefer the familiar `std::` spelling when std re-exports it.
-                // Both sources can name the same item; pick the better spelling.
-                let path = [
-                    aliases.get(&canonical).cloned(),
-                    std_facing_path(&canonical),
-                ]
-                .into_iter()
-                .flatten()
-                .min_by_key(|p| alias_preference(p))
-                .unwrap_or(canonical);
+                let item = ItemRef::new(cid, *id);
+                let Some(path) = universe.path_of(item) else {
+                    continue;
+                };
                 entries.push(Entry {
-                    item: ItemRef::new(cid, *id),
+                    item,
                     path,
                     name,
                     kind: summary.kind,
@@ -88,14 +77,6 @@ impl SearchIndex {
 
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// The display path chosen for each item, for the universe to reuse.
-    pub fn display_paths(&self) -> HashMap<ItemRef, String> {
-        self.entries
-            .iter()
-            .map(|e| (e.item, e.path.clone()))
-            .collect()
     }
 
     /// Fuzzy-search the index, best matches first.
@@ -269,173 +250,13 @@ fn rank(e: &Entry) -> u8 {
     depth_penalty * 4 + kind_penalty
 }
 
-/// Map canonical paths to the `std::` path that re-exports them.
-///
-/// Walks `std`'s `Use` items; each names a target whose id is crate-local to
-/// `std` but whose `paths` entry gives the canonical foreign path.
-fn std_aliases(universe: &Universe) -> HashMap<String, String> {
-    let mut aliases: HashMap<String, String> = HashMap::new();
-
-    let Some(std_id) = universe
-        .crate_ids()
-        .find(|c| universe.crate_name(*c) == "std")
-    else {
-        return aliases;
-    };
-    let krate = universe.krate(std_id);
-
-    // Module paths within std, so a re-export can be given its full std path.
-    let module_path = std_module_paths(universe, std_id);
-
-    for (id, item) in &krate.index {
-        let ItemEnum::Use(u) = &item.inner else {
-            continue;
-        };
-        if u.is_glob {
-            continue;
-        }
-        let Some(target) = u.id else { continue };
-        // The target id is meaningful only inside std; `paths` translates it.
-        let Some(summary) = krate.paths.get(&target) else {
-            continue;
-        };
-        let canonical = summary.path.join("::");
-
-        let Some(parent) = module_path.get(id) else {
-            continue;
-        };
-        let alias = if parent.is_empty() {
-            format!("std::{}", u.name)
-        } else {
-            format!("std::{}::{}", parent, u.name)
-        };
-
-        // Prefer the canonical home (`std::vec::Vec`) over re-export shims
-        // like `std::prelude::v1::Vec`, then prefer the shorter path.
-        aliases
-            .entry(canonical)
-            .and_modify(|existing| {
-                if alias_preference(&alias) < alias_preference(existing) {
-                    *existing = alias.clone();
-                }
-            })
-            .or_insert(alias);
-    }
-
-    aliases
-}
-
-/// Rewrite a `core::`/`alloc::` path to the `std::` path that mirrors it.
-///
-/// `std` re-exports whole modules of `core` and `alloc` with `pub use`, but
-/// rustdoc's JSON records those as glob re-exports whose module trees are not
-/// reachable from `std`'s root — so the mapping cannot be derived structurally
-/// and is listed here instead. These module names are long-standing stable
-/// public API, so the list is stable too.
-fn std_facing_path(canonical: &str) -> Option<String> {
-    const MIRRORED: &[&str] = &[
-        "alloc",
-        "any",
-        "array",
-        "ascii",
-        "borrow",
-        "boxed",
-        "cell",
-        "char",
-        "clone",
-        "cmp",
-        "convert",
-        "default",
-        "error",
-        "f32",
-        "f64",
-        "ffi",
-        "fmt",
-        "future",
-        "hash",
-        "hint",
-        "isize",
-        "iter",
-        "marker",
-        "mem",
-        "num",
-        "ops",
-        "option",
-        "panic",
-        "pin",
-        "primitive",
-        "ptr",
-        "rc",
-        "result",
-        "slice",
-        "str",
-        "string",
-        "sync",
-        "task",
-        "time",
-        "usize",
-        "vec",
-    ];
-
-    let (krate, rest) = canonical.split_once("::")?;
-    if krate != "core" && krate != "alloc" {
-        return None;
-    }
-    let module = rest.split("::").next()?;
-    if MIRRORED.contains(&module) {
-        Some(format!("std::{rest}"))
-    } else {
-        None
-    }
-}
-
-/// Sort key deciding which of several std spellings to display.
-///
-/// `std::prelude::*` and `std::simd::prelude::*` re-export half the library
-/// under a shorter path, so path length alone picks the wrong name.
-fn alias_preference(path: &str) -> (u8, usize) {
-    let bucket = if path.contains("::prelude::") { 1 } else { 0 };
-    (bucket, path.len())
-}
-
-/// For each item in std, the `::`-joined module path containing it (minus `std::`).
-fn std_module_paths(universe: &Universe, std_id: CrateId) -> HashMap<rustdoc_types::Id, String> {
-    let krate = universe.krate(std_id);
-    let mut out = HashMap::new();
-    let mut stack = vec![(krate.root, String::new())];
-
-    while let Some((mod_id, prefix)) = stack.pop() {
-        let Some(item) = krate.index.get(&mod_id) else {
-            continue;
-        };
-        let ItemEnum::Module(m) = &item.inner else {
-            continue;
-        };
-
-        for child in &m.items {
-            out.insert(*child, prefix.clone());
-            if let Some(c) = krate.index.get(child)
-                && matches!(c.inner, ItemEnum::Module(_))
-                && let Some(name) = &c.name
-            {
-                let next = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}::{name}")
-                };
-                stack.push((*child, next));
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docs::CrateId;
 
     fn index() -> (Universe, SearchIndex) {
-        crate::testdocs::indexed_raw()
+        crate::testdocs::indexed()
     }
 
     #[test]
@@ -478,7 +299,7 @@ mod tests {
             ("pathbuf", "std::path::PathBuf"),
             ("refcell", "std::cell::RefCell"),
             ("duration", "std::time::Duration"),
-            ("iterator", "std::iter::traits::iterator::Iterator"),
+            ("iterator", "std::iter::Iterator"),
         ] {
             let hits = idx.search(query, 5);
             assert!(!hits.is_empty(), "no hits for {query}");
@@ -517,29 +338,5 @@ mod tests {
             obscurity_penalty(&e("core::core_arch::s390x::vector::sealed::Vec", "Vec"))
                 > obscurity_penalty(&e("std::sys::Vec", "Vec"))
         );
-    }
-
-    #[test]
-    fn mirrors_core_and_alloc_modules_onto_std() {
-        assert_eq!(
-            std_facing_path("alloc::vec::Vec").as_deref(),
-            Some("std::vec::Vec")
-        );
-        assert_eq!(
-            std_facing_path("core::option::Option").as_deref(),
-            Some("std::option::Option")
-        );
-        assert_eq!(
-            std_facing_path("alloc::rc::Rc").as_deref(),
-            Some("std::rc::Rc")
-        );
-        // Internals that std does not re-export keep their own name.
-        assert_eq!(std_facing_path("core::core_arch::x86::foo"), None);
-        assert_eq!(std_facing_path("std::fs::File"), None);
-    }
-
-    #[test]
-    fn prefers_canonical_module_over_prelude() {
-        assert!(alias_preference("std::vec::Vec") < alias_preference("std::prelude::v1::Vec"));
     }
 }

@@ -14,27 +14,17 @@ use crate::load;
 ///
 /// Panics with the install hint when the rustdoc JSON is unavailable.
 pub fn universe() -> Universe {
-    let crates = match load::load_std_crates() {
-        Ok(crates) => crates,
+    match load::load_std_crates() {
+        Ok(crates) => Universe::new(crates),
         Err(e) => {
             panic!("these tests need the rustdoc JSON for std, which could not be loaded:\n{e:#}")
         }
-    };
-    let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-    Universe::new(crates, names)
+    }
 }
 
-/// A universe and its search index, without display paths applied.
-pub fn indexed_raw() -> (Universe, SearchIndex) {
+/// A universe and its search index.
+pub fn indexed() -> (Universe, SearchIndex) {
     let u = universe();
     let idx = SearchIndex::build(&u);
-    (u, idx)
-}
-
-/// A universe with its search index, and display paths already applied.
-pub fn indexed() -> (Universe, SearchIndex) {
-    let mut u = universe();
-    let idx = SearchIndex::build(&u);
-    u.set_display_paths(idx.display_paths());
     (u, idx)
 }

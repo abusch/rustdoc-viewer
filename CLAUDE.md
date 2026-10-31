@@ -93,10 +93,14 @@ Data flows in one direction: `load` → `docs` → `index` → `page` → `ui`.
 ### Three ideas worth knowing before editing
 
 **Display paths vs. canonical paths.** `Vec` really lives at `alloc::vec::Vec`
-but must be *shown* as `std::vec::Vec`. `main` builds the index, then calls
-`universe.set_display_paths(index.display_paths())` to install the reader-facing
-spelling. Both spellings exist for most items, and lookups often have to try each
-— `by_path` is keyed canonically, so a display path will not resolve against it.
+but must be *shown* as `std::vec::Vec`. `Universe::new` derives the reader-facing
+spelling the way rustdoc's HTML inlining does: it walks each crate's public
+namespace (`std` first, so its spelling wins), following re-exports (named and
+glob) across crates and skipping `#[doc(no_inline)]` ones, which the website
+renders as links rather than pages. Anything not reachable that way — a method,
+an internal — is spelled through its nearest ancestor that is. `path_of` returns it.
+Both spellings exist for most items, and lookups often have to try each —
+`by_path` is keyed canonically, so a display path will not resolve against it.
 
 **Not every item is in `paths`.** Trait-impl members (`String`'s `clone`) are
 absent from rustdoc's `paths` map entirely: no path, no kind, so `kind_of`,

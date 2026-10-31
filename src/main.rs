@@ -25,12 +25,8 @@ fn main() -> Result<()> {
     // Load before touching the terminal, so errors print normally.
     eprint!("loading rust documentation... ");
     let started = std::time::Instant::now();
-    let crates = load::load_std_crates()?;
-    let names = load::STD_CRATES.iter().map(|s| s.to_string()).collect();
-    let mut universe = docs::Universe::new(crates, names);
+    let universe = docs::Universe::new(load::load_std_crates()?);
     let index = index::SearchIndex::build(&universe);
-    // Show items under the name people searched for, not their defining crate.
-    universe.set_display_paths(index.display_paths());
     eprintln!(
         "{} items in {:.2}s",
         index.len(),
