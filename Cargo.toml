@@ -15,9 +15,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-arborium = { version = "2.18.1", features = ["lang-rust"] }
-arborium-highlight = "2.18.1"
-arborium-theme = "2.18.1"
+arborium = { version = "2.18.2", features = ["lang-rust"] }
+arborium-highlight = "2.18.2"
+arborium-theme = "2.18.2"
 frizbee = "0.13"
 opaline = { version = "0.4.2", features = ["global-state"] }
 pulldown-cmark = { version = "0.13", default-features = false }
