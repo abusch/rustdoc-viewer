@@ -2,8 +2,8 @@
 
 use rustdoc_types::{
     Abi, FunctionSignature, GenericArg, GenericArgs, GenericBound, GenericParamDef,
-    GenericParamDefKind, Generics, Item, ItemEnum, PreciseCapturingArg, Term, TraitBoundModifier,
-    Type, WherePredicate,
+    GenericParamDefKind, Generics, Item, ItemEnum, MacroKind, PreciseCapturingArg, Term,
+    TraitBoundModifier, Type, WherePredicate,
 };
 
 /// Format a type as Rust source.
@@ -466,6 +466,12 @@ pub fn signature(item: &Item) -> Option<String> {
         ItemEnum::Primitive(_) => Some(format!("primitive {name}")),
         ItemEnum::Module(_) => Some(format!("mod {name}")),
         ItemEnum::Macro(def) => Some(def.clone()),
+        // Built-in macros have no source to quote, so show how one is invoked.
+        ItemEnum::ProcMacro(m) => Some(match m.kind {
+            MacroKind::Bang => format!("{name}!() {{ /* proc-macro */ }}"),
+            MacroKind::Attr => format!("#[{name}]"),
+            MacroKind::Derive => format!("#[derive({name})]"),
+        }),
         _ => None,
     }
 }

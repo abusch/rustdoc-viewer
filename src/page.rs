@@ -143,16 +143,24 @@ mod indent {
 }
 
 /// Module children are listed in this order, matching the docs.rs layout.
-const MODULE_KINDS: [(ItemKind, &str); 9] = [
+///
+/// A kind missing from here is silently left out of every module page, which
+/// is how `MaybeUninit` (a union) and `core`'s built-in derives once went
+/// unlisted.
+const MODULE_KINDS: [(ItemKind, &str); 13] = [
     (ItemKind::Module, "Modules"),
     (ItemKind::Macro, "Macros"),
     (ItemKind::Struct, "Structs"),
     (ItemKind::Enum, "Enums"),
+    (ItemKind::Union, "Unions"),
     (ItemKind::Trait, "Traits"),
     (ItemKind::Function, "Functions"),
     (ItemKind::TypeAlias, "Type Aliases"),
     (ItemKind::Constant, "Constants"),
+    (ItemKind::Static, "Statics"),
     (ItemKind::Primitive, "Primitives"),
+    (ItemKind::ProcAttribute, "Attribute Macros"),
+    (ItemKind::ProcDerive, "Derive Macros"),
 ];
 
 /// Collect and group the impls attached to an item.
@@ -776,6 +784,35 @@ mod tests {
         );
         // Children are navigable, not just printed.
         assert!(page.targets.len() > 50, "module children should be targets");
+    }
+
+    /// Every kind a module can hold gets a listing, not just the common ones.
+    #[test]
+    fn module_listings_include_unions_and_derive_macros() {
+        let u = universe();
+        let hl = Highlighter::new();
+        let listing = |path: &str, title: &str| -> Vec<String> {
+            let r = u.by_path(path).expect(path);
+            let page = build(&u, r, 100, &hl, &default_expanded());
+            let start = page
+                .lines
+                .iter()
+                .position(|l| text_of(l).contains(title))
+                .unwrap_or_else(|| panic!("{path} has no {title} section"));
+            page.lines[start + 1..]
+                .iter()
+                .map(text_of)
+                .take_while(|l| !l.starts_with(['▾', '▸']))
+                .collect()
+        };
+
+        let unions = listing("core::mem", "Unions");
+        assert!(
+            unions.iter().any(|l| l.contains("MaybeUninit")),
+            "{unions:?}"
+        );
+        let derives = listing("core::clone", "Derive Macros");
+        assert!(derives.iter().any(|l| l.contains("Clone")), "{derives:?}");
     }
 
     #[test]
