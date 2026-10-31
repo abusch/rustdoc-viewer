@@ -27,11 +27,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.screen {
         Screen::Search => draw_search(f, app, chunks[0]),
-        Screen::Item | Screen::Help => draw_item(f, app, chunks[0]),
+        Screen::Item => draw_item(f, app, chunks[0]),
     }
     draw_status(f, app, chunks[1]);
 
-    if app.screen == Screen::Help {
+    if app.help {
         draw_help(f, area);
     }
 }
@@ -121,16 +121,13 @@ const SIDE_PADDING: u16 = 2;
 
 fn draw_item(f: &mut Frame, app: &mut App, area: Rect) {
     // Inset before anything measures the area: the page is built to this
-    // width, and `ensure_width` must be told the same number the lines are
-    // wrapped to or every frame rebuilds the page.
+    // width, so it is the one the app must be told.
     let area = Rect {
         x: area.x + SIDE_PADDING,
         width: area.width.saturating_sub(SIDE_PADDING * 2),
         ..area
     };
-    app.viewport = area.height.saturating_sub(HEADER_HEIGHT);
-    app.last_width = area.width;
-    app.ensure_width(area.width);
+    app.resize(area.width, area.height.saturating_sub(HEADER_HEIGHT));
 
     let Some(page) = &app.page else {
         f.render_widget(

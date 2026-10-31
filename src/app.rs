@@ -15,7 +15,6 @@ const MIN_PAGE_WIDTH: u16 = 20;
 pub enum Screen {
     Search,
     Item,
-    Help,
 }
 
 /// One entry in the browsing history.
@@ -37,8 +36,9 @@ pub struct App {
     pub highlighter: Highlighter,
 
     pub screen: Screen,
-    /// The screen to return to when leaving help.
-    prev_screen: Screen,
+    /// Whether the help popup is drawn over the screen. An overlay rather than
+    /// a screen of its own, so closing it needs no memory of what was behind.
+    pub help: bool,
     pub should_quit: bool,
 
     // Search state
@@ -58,12 +58,11 @@ pub struct App {
     history: Vec<HistoryEntry>,
     cursor: usize,
 
+    /// Rows of page the item view shows; set through [`Self::resize`].
     pub viewport: u16,
     pub status: Option<String>,
-    /// Width the item view last had room for, used to decide when to re-wrap.
-    /// This is the padded content width, not the terminal's: it must match what
-    /// [`Self::ensure_width`] is given or every frame rebuilds the page.
-    pub last_width: u16,
+    /// Columns the item view has for the page; set through [`Self::resize`].
+    width: u16,
 }
 
 impl App {
@@ -73,7 +72,7 @@ impl App {
             index,
             highlighter: Highlighter::new(),
             screen: Screen::Search,
-            prev_screen: Screen::Search,
+            help: false,
             should_quit: false,
             query: String::new(),
             results: Vec::new(),
@@ -87,7 +86,7 @@ impl App {
             cursor: 0,
             viewport: 20,
             status: None,
-            last_width: 80,
+            width: 80,
         };
         app.refresh_search();
         // Open on the crate root so there is something to read and navigate
@@ -227,13 +226,18 @@ impl App {
         let Some(i) = target_index(p, item, true) else {
             return false;
         };
-        let line = p.targets[i].line as u16;
+        let line = p.targets[i].line;
         self.focus = Some(i);
-        // Sit the target a third of the way down rather than at the very top,
-        // so the impl header above it stays visible.
-        self.scroll = line.saturating_sub(self.viewport / 3);
-        self.clamp_scroll();
+        self.bring_into_view(line);
         true
+    }
+
+    /// Scroll `line` a third of the way down the viewport rather than to the
+    /// very top, so what introduces it — an impl header above a method — stays
+    /// visible.
+    fn bring_into_view(&mut self, line: usize) {
+        self.scroll = (line as u16).saturating_sub(self.viewport / 3);
+        self.clamp_scroll();
     }
 
     /// The sections toggled away from their default on the current page.
@@ -243,7 +247,7 @@ impl App {
 
     /// Flip one section's folded state and rebuild.
     fn toggle_section_id(&mut self, id: SectionId) {
-        if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
+        if let Some(entry) = self.current_mut() {
             match entry.toggled.iter().position(|s| *s == id) {
                 Some(i) => {
                     entry.toggled.remove(i);
@@ -277,7 +281,7 @@ impl App {
     }
 
     fn restore(&mut self) {
-        if let Some(entry) = self.history.get(self.cursor.saturating_sub(1)) {
+        if let Some(entry) = self.current() {
             self.scroll = entry.scroll;
             self.focus = None;
             self.section_cursor = 0;
@@ -287,15 +291,20 @@ impl App {
     }
 
     fn save_scroll(&mut self) {
-        if self.cursor > 0
-            && let Some(entry) = self.history.get_mut(self.cursor - 1)
-        {
-            entry.scroll = self.scroll;
+        let scroll = self.scroll;
+        if let Some(entry) = self.current_mut() {
+            entry.scroll = scroll;
         }
     }
 
+    /// The history entry for the page on screen. `cursor` counts the entries
+    /// up to and including it, so it is the one just before the cursor.
     fn current(&self) -> Option<&HistoryEntry> {
         self.history.get(self.cursor.checked_sub(1)?)
+    }
+
+    fn current_mut(&mut self) -> Option<&mut HistoryEntry> {
+        self.history.get_mut(self.cursor.checked_sub(1)?)
     }
 
     pub fn rebuild_page(&mut self) {
@@ -345,21 +354,26 @@ impl App {
         true
     }
 
-    /// Re-render if the terminal width changed since the page was built.
-    pub fn ensure_width(&mut self, width: u16) {
+    /// Record the room the item view has, re-wrapping the page if its width
+    /// changed.
+    ///
+    /// Called every frame with the view's own content area — padding already
+    /// taken off — since that is what the page's lines must fit.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.viewport = height;
+        self.width = width;
         if self
             .page
             .as_ref()
-            .is_some_and(|p| p.width != width.max(MIN_PAGE_WIDTH))
+            .is_some_and(|p| p.width != self.page_width())
         {
             self.rebuild_page();
         }
     }
 
-    /// The width pages are built at. The item view has no border, so this is
-    /// the whole terminal; both callers must agree or every frame rebuilds.
+    /// The width pages are built at.
     fn page_width(&self) -> u16 {
-        self.last_width.max(MIN_PAGE_WIDTH)
+        self.width.max(MIN_PAGE_WIDTH)
     }
 
     // --- Scrolling --------------------------------------------------------
@@ -422,15 +436,7 @@ impl App {
             self.status = Some("no section selected — use n/p".into());
             return;
         };
-
-        if let Some(entry) = self.history.get_mut(self.cursor.saturating_sub(1)) {
-            if let Some(i) = entry.toggled.iter().position(|g| *g == section) {
-                entry.toggled.remove(i);
-            } else {
-                entry.toggled.push(section);
-            }
-        }
-        self.rebuild_page();
+        self.toggle_section_id(section);
 
         // Keep the toggled header where the eye already is.
         if let Some(p) = &self.page
@@ -488,16 +494,12 @@ impl App {
                 .unwrap_or(last),
         });
 
-        // Scroll the focused target into view.
-        if let Some(f) = self.focus
-            && let Some(t) = p.targets.get(f)
-        {
-            let line = t.line as u16;
-            if line < self.scroll || line >= self.scroll + self.viewport {
-                self.scroll = line.saturating_sub(self.viewport / 3);
-            }
+        // Scroll the focused target into view, if it is not already.
+        let line = self.focus.and_then(|f| p.targets.get(f)).map(|t| t.line);
+        match line {
+            Some(l) if !(start..end).contains(&l) => self.bring_into_view(l),
+            _ => self.clamp_scroll(),
         }
-        self.clamp_scroll();
     }
 
     /// Follow the focused target, if any.
@@ -525,23 +527,6 @@ impl App {
             Some(parent) => self.navigate_to(parent),
             None => self.status = Some("already at the top".into()),
         }
-    }
-
-    pub fn show_help(&mut self) {
-        if self.screen != Screen::Help {
-            self.prev_screen = self.screen;
-            self.screen = Screen::Help;
-        }
-    }
-
-    pub fn close_help(&mut self) {
-        if self.screen == Screen::Help {
-            self.screen = self.prev_screen;
-        }
-    }
-
-    pub fn has_page(&self) -> bool {
-        self.page.is_some()
     }
 }
 
@@ -628,7 +613,7 @@ mod tests {
     #[test]
     fn shift_tab_walks_links_backwards() {
         let mut a = app_on("core::option::Option");
-        a.viewport = 30;
+        a.resize(80, 30);
 
         a.focus_next_target();
         a.focus_next_target();
@@ -640,7 +625,7 @@ mod tests {
     #[test]
     fn focus_wraps_at_both_ends() {
         let mut a = app_on("core::option::Option");
-        a.viewport = 30;
+        a.resize(80, 30);
         let last = a.page.as_ref().unwrap().targets.len() - 1;
 
         // Backwards off the front wraps to the final target.
@@ -656,7 +641,7 @@ mod tests {
     #[test]
     fn first_shift_tab_starts_from_the_visible_page() {
         let mut a = app_on("core::option::Option");
-        a.viewport = 30;
+        a.resize(80, 30);
 
         // With nothing focused, stepping back should pick a target the reader
         // can see rather than jumping to the end of a long page.
@@ -793,8 +778,7 @@ mod tests {
     #[test]
     fn a_focused_method_survives_a_width_change() {
         let mut a = app();
-        a.last_width = 80;
-        a.viewport = 25;
+        a.resize(80, 25);
         let m = a
             .universe
             .by_path("alloc::string::String::push_str")
@@ -814,8 +798,7 @@ mod tests {
         );
 
         // Same page, rebuilt for a wider terminal.
-        a.last_width = 140;
-        a.ensure_width(140);
+        a.resize(140, 25);
         assert!(
             on_screen(&a).is_some_and(|l| l.starts_with("fn push_str")),
             "the focused method scrolled off after the resize"

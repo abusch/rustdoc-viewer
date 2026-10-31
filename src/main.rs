@@ -69,10 +69,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // Help swallows every key except the ones that dismiss it.
-    if app.screen == Screen::Help {
-        match key.code {
-            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => app.close_help(),
-            _ => {}
+    if app.help {
+        if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
+            app.help = false;
         }
         return;
     }
@@ -84,7 +83,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         (KeyCode::Char('?'), _) if app.screen != Screen::Search => {
-            app.show_help();
+            app.help = true;
             return;
         }
         _ => {}
@@ -93,7 +92,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match app.screen {
         Screen::Search => search_key(app, key, ctrl),
         Screen::Item => item_key(app, key, ctrl),
-        Screen::Help => {}
     }
 }
 
@@ -102,7 +100,7 @@ fn search_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         (KeyCode::Esc, _) => {
             // Esc dismisses the search and returns to the page behind it.
             // Only `q` quits, so with no page to go back to it does nothing.
-            if app.has_page() {
+            if app.page.is_some() {
                 app.screen = Screen::Item;
             }
         }
@@ -207,9 +205,10 @@ mod tests {
 
         // Help: Esc closes the popup.
         press(&mut a, KeyCode::Char('?'), KeyModifiers::NONE);
-        assert_eq!(a.screen, Screen::Help);
+        assert!(a.help);
         press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!a.should_quit, "esc should not quit the help");
+        assert!(!a.help);
         assert_eq!(a.screen, Screen::Item);
 
         // q still quits.
