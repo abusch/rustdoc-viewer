@@ -95,13 +95,16 @@ pub fn muted() -> Style {
     style(styles::MUTED)
 }
 
-/// A deprecation notice.
+/// A deprecation notice: the warning colour, in bold, so it stands out from
+/// [`unstable`].
 pub fn deprecated() -> Style {
-    style(styles::WARNING_STYLE)
+    style(styles::WARNING_STYLE).add_modifier(Modifier::BOLD)
 }
 
 /// An unstable-feature notice: a caveat rather than a defect, so it reads a
-/// step softer than [`deprecated`].
+/// step softer than [`deprecated`] — the same colour, without the weight.
+/// Nightly docs mark a good share of items unstable, so this is also the one
+/// that must not shout.
 pub fn unstable() -> Style {
     style(styles::WARNING_STYLE)
 }
@@ -238,6 +241,14 @@ pub fn status_bar() -> Style {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    /// A deprecation is a defect and an unstable feature only a caveat; once
+    /// both notices were the same style, which said they mattered equally.
+    #[test]
+    fn deprecation_outweighs_instability() {
+        init();
+        assert_ne!(deprecated(), unstable());
+    }
 
     /// The named theme must actually exist: a typo here would silently leave
     /// opaline's default theme in place.
