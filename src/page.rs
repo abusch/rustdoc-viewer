@@ -612,7 +612,6 @@ fn variant_decl(u: &Universe, parent: ItemRef, item: &Item) -> String {
     }
 }
 
-/// Shift a rendered line right by `n` columns.
 /// Embolden every span of a line, in place of a line-level style.
 ///
 /// The spans carry their own colors from the highlighter, and styling each one
@@ -659,6 +658,7 @@ fn tinted(line: Line<'static>, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Shift a rendered line right by `n` columns.
 fn indent_line(n: usize, line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(n))];
     spans.extend(line.spans);
@@ -692,9 +692,6 @@ fn is_public(item: &Item) -> bool {
 fn summary_line(item: &Item) -> Option<String> {
     let docs = item.docs.as_ref()?;
     let first = docs.lines().find(|l| !l.trim().is_empty())?.trim();
-    if first.is_empty() {
-        return None;
-    }
     let cleaned = strip_link_brackets(first);
     Some(cleaned.chars().take(80).collect())
 }
@@ -730,16 +727,6 @@ fn strip_link_brackets(s: &str) -> String {
         }
     }
     out
-}
-
-/// The sections a fresh page has been explicitly toggled open or shut.
-///
-/// Empty: every section starts at its own default. Which sections a page even
-/// has is not known until it is built — a module's listings depend on what it
-/// contains — so this records *deviations* from the defaults rather than the
-/// open set, and [`is_expanded`] resolves the two.
-pub fn default_expanded() -> Vec<SectionId> {
-    Vec::new()
 }
 
 /// Whether a section is open, given the sections the reader has toggled.

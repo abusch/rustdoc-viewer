@@ -24,6 +24,10 @@ struct HistoryEntry {
     scroll: u16,
     /// Sections the reader has toggled away from their default state; see
     /// [`page::is_expanded`].
+    ///
+    /// Deviations rather than the open set, because which sections a page has
+    /// is not known until it is built — a module's listings depend on what it
+    /// contains. A fresh page starts empty: every section at its default.
     toggled: Vec<SectionId>,
 }
 
@@ -147,7 +151,7 @@ impl App {
         self.history.push(HistoryEntry {
             item: target,
             scroll: 0,
-            toggled: page::default_expanded(),
+            toggled: Vec::new(),
         });
         self.cursor = self.history.len();
         self.scroll = 0;
