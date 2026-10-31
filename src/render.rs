@@ -202,25 +202,12 @@ fn strip_hidden(code: &str) -> String {
     out
 }
 
-/// Marks a span as belonging to link number `n`.
+/// Inline text waiting to be wrapped: each span with the link it belongs to.
 ///
-/// Link extents cannot be recorded when the link is emitted: at that point the
-/// text is still an unwrapped run of spans, and `wrap_into` decides only later
-/// which line each piece lands on. So links are tagged here and their extents
-/// recovered from the wrapped lines afterwards. `underline_color` is unused by
-/// this renderer, carries through wrapping untouched, and is cleared once the
-/// tag has been read back.
-fn tag(style: Style, n: usize) -> Style {
-    style.underline_color(Color::Indexed(u8::try_from(n % 255).unwrap_or(0) + 1))
-}
-
-/// Read back the link number a span was tagged with, if any.
-fn tag_of(style: Style) -> Option<usize> {
-    match style.underline_color {
-        Some(Color::Indexed(n)) if n > 0 => Some(usize::from(n - 1)),
-        _ => None,
-    }
-}
+/// A link's extent cannot be recorded when the link is emitted, because only
+/// wrapping decides which line each piece lands on. Carrying the link beside
+/// the span lets [`flush`] record the extent as it lays the lines out.
+type Run = Vec<(Span<'static>, Option<Id>)>;
 
 /// Render an item's markdown docs to styled, width-wrapped lines.
 pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highlighter) -> Rendered {
@@ -228,15 +215,13 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
     let mut out = Rendered::default();
 
     // State accumulated across events for the current paragraph.
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run: Run = Vec::new();
     let mut style = Style::default();
     let mut list_depth: usize = 0;
     let mut in_code: Option<String> = None;
     let mut code_lang = "rs";
     let mut quote_depth = 0usize;
     let mut pending_link: Option<String> = None;
-    // Links tagged in the current unflushed run, indexed by tag number.
-    let mut pending_ids: Vec<Id> = Vec::new();
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -252,43 +237,29 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
         Some((raw.into(), pulldown_cmark::CowStr::Borrowed("")))
     };
 
-    // Flush the current inline run as wrapped lines with the given indent,
-    // then recover the extent of every link tagged within it.
-    macro_rules! flush {
-        ($indent:expr) => {{
-            if !spans.is_empty() {
-                let indent: String = $indent;
-                let from = out.lines.len();
-                wrap_into(&mut out.lines, std::mem::take(&mut spans), width, &indent);
-                collect_links(&mut out, from, &pending_ids);
-            }
-            pending_ids.clear();
-        }};
-    }
-
     let parser = Parser::new_with_broken_link_callback(docs, opts, Some(&mut callback));
     for event in parser {
         match event {
             Event::Start(Tag::Heading { .. }) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 if !out.lines.is_empty() {
                     out.lines.push(Line::default());
                 }
                 style = theme::heading();
             }
             Event::End(TagEnd::Heading(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 style = Style::default();
                 out.lines.push(Line::default());
             }
             Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
                 let indent = "  ".repeat(list_depth) + &"> ".repeat(quote_depth);
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
                 out.lines.push(Line::default());
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 code_lang = match &kind {
                     CodeBlockKind::Fenced(info) => code_language(info),
                     CodeBlockKind::Indented => "rs",
@@ -305,7 +276,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                 }
             }
             Event::Start(Tag::List(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 list_depth += 1;
             }
             Event::End(TagEnd::List(_)) => {
@@ -315,14 +286,14 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
                 }
             }
             Event::Start(Tag::Item) => {
-                spans.push(Span::raw("• "));
+                run.push((Span::raw("• "), None));
             }
             Event::End(TagEnd::Item) => {
                 let indent = "  ".repeat(list_depth.saturating_sub(1));
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 quote_depth += 1;
                 style = theme::quote();
             }
@@ -346,33 +317,29 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             }
             Event::Code(text) => {
                 // Inline code may itself be an intra-doc link target.
-                let key = text.to_string();
-                let mut st = theme::inline_code();
-                if let Some(id) = lookup(links, &key, pending_link.as_deref()) {
-                    st = tag(theme::link(), pending_ids.len());
-                    pending_ids.push(id);
-                }
-                spans.push(Span::styled(key, st));
+                let link = lookup(links, &text, pending_link.as_deref());
+                let st = if link.is_some() {
+                    theme::link()
+                } else {
+                    theme::inline_code()
+                };
+                run.push((Span::styled(text.to_string(), st), link));
             }
             Event::Text(text) => {
                 if let Some(code) = in_code.as_mut() {
                     code.push_str(&text);
                 } else {
-                    let mut st = style;
-                    if let Some(id) = lookup(links, &text, pending_link.as_deref()) {
-                        st = tag(style, pending_ids.len());
-                        pending_ids.push(id);
-                    }
-                    spans.push(Span::styled(text.to_string(), st));
+                    let link = lookup(links, &text, pending_link.as_deref());
+                    run.push((Span::styled(text.to_string(), style), link));
                 }
             }
-            Event::SoftBreak => spans.push(Span::raw(" ")),
+            Event::SoftBreak => run.push((Span::raw(" "), None)),
             Event::HardBreak => {
                 let indent = "  ".repeat(list_depth);
-                flush!(indent);
+                flush(&mut out, &mut run, width, &indent);
             }
             Event::Rule => {
-                flush!(String::new());
+                flush(&mut out, &mut run, width, "");
                 out.lines.push(Line::styled(
                     "─".repeat(width.min(60)),
                     Style::new().fg(Color::DarkGray),
@@ -381,7 +348,7 @@ pub fn markdown(docs: &str, links: &HashMap<String, Id>, width: u16, hl: &Highli
             _ => {}
         }
     }
-    flush!(String::new());
+    flush(&mut out, &mut run, width, "");
 
     // Trailing blank lines add nothing but scrolling.
     while out.lines.last().is_some_and(|l| l.width() == 0) {
@@ -421,41 +388,6 @@ fn collapse_blank_runs(out: &mut Rendered) {
     out.lines = kept;
 }
 
-/// Recover link extents from lines `from..` and clear the tags.
-///
-/// Wrapping may split a tagged run across lines; each line the tag appears on
-/// becomes its own `LinkTarget`, so the highlight follows the text exactly.
-fn collect_links(out: &mut Rendered, from: usize, ids: &[Id]) {
-    for line in from..out.lines.len() {
-        // Run of consecutive spans sharing one tag: (tag, start index).
-        let mut run: Option<(usize, usize)> = None;
-        let len = out.lines[line].spans.len();
-        for i in 0..=len {
-            let here = (i < len)
-                .then(|| tag_of(out.lines[line].spans[i].style))
-                .flatten();
-            match (run, here) {
-                (Some((n, _)), Some(m)) if n == m => continue,
-                (Some((n, start)), _) => {
-                    if let Some(id) = ids.get(n) {
-                        out.links.push(LinkTarget {
-                            line,
-                            spans: start..i,
-                            id: *id,
-                        });
-                    }
-                    run = here.map(|m| (m, i));
-                }
-                (None, Some(m)) => run = Some((m, i)),
-                (None, None) => {}
-            }
-        }
-        for span in &mut out.lines[line].spans {
-            span.style.underline_color = None;
-        }
-    }
-}
-
 /// Resolve a link by its display text or its destination.
 ///
 /// Rustdoc keys `Item.links` by the link text as written, which may or may not
@@ -472,17 +404,21 @@ fn lookup(links: &HashMap<String, Id>, text: &str, dest: Option<&str>) -> Option
         .copied()
 }
 
-/// Word-wrap a run of spans to `width`, preserving each span's style.
-fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usize, indent: &str) {
+/// Word-wrap the pending run to `width` beneath `indent`, emptying it.
+///
+/// Each span keeps its style, and every link records the spans it landed on.
+/// Wrapping can split one link across lines, which yields one target per line
+/// so the highlight follows the text exactly.
+fn flush(out: &mut Rendered, run: &mut Run, width: usize, indent: &str) {
     let avail = width.saturating_sub(indent.len()).max(8);
-    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current: Run = Vec::new();
     let mut used = 0usize;
 
     // Continuation lines line up under the first, past any bullet.
     let cont: String = " ".repeat(indent.len());
     let mut first = true;
 
-    for span in spans {
+    for (span, link) in run.drain(..) {
         let style = span.style;
         for word in split_keeping_spaces(&span.content) {
             let w = word.chars().count();
@@ -491,10 +427,7 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
                 continue;
             }
             if used + w > avail && used > 0 {
-                out.push(prefixed(
-                    if first { indent } else { &cont },
-                    std::mem::take(&mut current),
-                ));
+                push_wrapped(out, if first { indent } else { &cont }, &mut current);
                 first = false;
                 used = 0;
                 if word.trim().is_empty() {
@@ -502,12 +435,39 @@ fn wrap_into(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, width: usi
                 }
             }
             used += w;
-            current.push(Span::styled(word, style));
+            current.push((Span::styled(word, style), link));
         }
     }
     if !current.is_empty() {
-        out.push(prefixed(if first { indent } else { &cont }, current));
+        push_wrapped(out, if first { indent } else { &cont }, &mut current);
     }
+}
+
+/// Emit one wrapped line, recording a target for each link on it.
+///
+/// Consecutive spans naming the same item are one link: a link's text is
+/// split into words for wrapping, and they must light up together.
+fn push_wrapped(out: &mut Rendered, indent: &str, current: &mut Run) {
+    let line = out.lines.len();
+    let mut spans = Vec::with_capacity(current.len() + 1);
+    if !indent.is_empty() {
+        spans.push(Span::raw(indent.to_string()));
+    }
+    for (span, link) in current.drain(..) {
+        let i = spans.len();
+        if let Some(id) = link {
+            match out.links.last_mut() {
+                Some(t) if t.line == line && t.id == id && t.spans.end == i => t.spans.end += 1,
+                _ => out.links.push(LinkTarget {
+                    line,
+                    spans: i..i + 1,
+                    id,
+                }),
+            }
+        }
+        spans.push(span);
+    }
+    out.lines.push(Line::from(spans));
 }
 
 /// Dress one line of a fenced code block: a gutter rule, then the code, then
@@ -547,15 +507,6 @@ const CODE_GUTTER: usize = 2;
 
 /// Widest a code block's background is painted, gutter included.
 const CODE_BLOCK_WIDTH: usize = 100;
-
-fn prefixed(indent: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
-    if indent.is_empty() {
-        return Line::from(spans);
-    }
-    let mut v = vec![Span::raw(indent.to_string())];
-    v.append(&mut spans);
-    Line::from(v)
-}
 
 /// Split text into words, keeping the whitespace as its own chunks.
 fn split_keeping_spaces(s: &str) -> Vec<String> {
@@ -679,22 +630,6 @@ mod tests {
         assert_eq!(link_text(&r, 1), "None");
         assert_eq!(r.links[0].id, Id(1));
         assert_eq!(r.links[1].id, Id(2));
-    }
-
-    #[test]
-    fn link_tags_do_not_survive_into_rendered_spans() {
-        let hl = Highlighter::new();
-        let mut links = HashMap::new();
-        links.insert("`None`".to_string(), Id(59));
-        let r = markdown("See [`None`] for details.", &links, 60, &hl);
-
-        // The tag is an internal marker; leaving it set would paint a stray
-        // underline colour in the terminal.
-        for line in &r.lines {
-            for span in &line.spans {
-                assert!(span.style.underline_color.is_none());
-            }
-        }
     }
 
     #[test]
